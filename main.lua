@@ -4,21 +4,21 @@ local love = require "love" -- avoids nil report from intellisense, safe to remo
 local enet = require "enet"
 local engine = require "engine"
 local networking = require "networking"
-local hostAddy = "ecosim.donreagan.ca:1988"
+local objects = require "object"
+local peers = {}
 local relay = enet.host_create()
+local hostAddy = "ecosim.donreagan.ca:1988"
 local relayServer = relay:connect(hostAddy)
+local event = relay:service()
 local flightSimMode = false
 local relative = true
-local peers = {}
-local event = relay:service()
-local objects = require "object"
 local cubeModel = objects.cubeModel
 local screen, camera, groundObject, triangleCount --, zBuffer
 
 --[[
 Notes:
 
-positions are {x = left/right(width), y = up/down(height), z = in/out(depth)} IN WORLD SPACE!!
+positions are {x = left/right(width), y = up/down(height), z = in/out(depth)} IN CAMERA SPACE!!
 ]]
 -- Procedurally generate a ground grid of cubes
 local function generateGround(tileSize, gridCount, baseHeight)
@@ -40,7 +40,7 @@ local function generateGround(tileSize, gridCount, baseHeight)
                 rot = q.identity(),
                 color = { r, g, b },
                 isSolid = true,
-                halfSize = { x = tileSize / 2, y = 0.005, z = tileSize / 2 } -- thin tile
+                halfSize = { x = tileSize / 2, y = 0.001, z = tileSize / 2 } -- thin tile
             })
         end
     end
@@ -65,7 +65,7 @@ function love.load()
     }
 
     camera = {
-        pos = { 0, 0, -5 },
+        pos = { 0, 10, -5 },
         rot = q.identity(),
         speed = 10,
         fov = math.rad(90),
@@ -76,8 +76,8 @@ function love.load()
         throttle = 0,
         maxSpeed = 50,
         box = {
-            halfSize = { x = 0.5, y = 1.8, z = 0.5 }, -- width/height/depth half extents
-            pos = { 0, 0, -5 },                       -- center at camera
+            halfSize = { x = 2, y = 2, z = 2 }, -- width/height/depth half extents
+            pos = { 0, 10, -5 },                       -- center at camera
             isSolid = true
         }
     }
@@ -96,33 +96,84 @@ function love.load()
     -- generate a 1000x1000 ground made of 10x10 tiles
     local tileSize = 2
     local gridCount = 10 -- 100 tiles per side -> 1000 units total
-    local baseHeight = -0.1
+    local baseHeight = 0.001
 
     local groundTiles = generateGround(tileSize, gridCount, baseHeight)
 
     for _, tile in ipairs(groundTiles) do
         table.insert(objects, tile)
     end
+
+    -- When initializing objects
+for _, obj in ipairs(objects) do
+    if obj.model and obj.model.vertices then
+        local verts, indices = {}, {}
+
+        for i, v in ipairs(obj.model.vertices) do
+            verts[i] = {
+                v[1], v[2], v[3],
+                0, 0,
+                obj.color[1] or 1,
+                obj.color[2] or 1,
+                obj.color[3] or 1,
+                1
+            }
+        end
+
+        for _, face in ipairs(obj.model.faces) do
+            for i = 2, #face - 1 do
+                table.insert(indices, face[1])
+                table.insert(indices, face[i])
+                table.insert(indices, face[i+1])
+            end
+        end
+
+        obj.mesh = love.graphics.newMesh(verts, "triangles", "static")
+        obj.mesh:setVertexMap(indices)
+    end
+end
 end
 
 -- === Mouse Look ===
 function love.mousemoved(x, y, dx, dy)
-    if not relative then
-        return
-    end
-    x, y, dx, dy = -x, -y, -dx, -dy
+    if not relative then return end
+
+
     local horizontal_sensitivity = 0.001
-    local vertical_sensitivity = 0.001
+    local vertical_sensitivity   = 0.001
 
-    -- Rotate around camera's local Y axis (yaw) and local X axis (pitch)
-    local right = q.rotateVector(camera.rot, { 1, 0, 0 })
-    local up = q.rotateVector(camera.rot, { 0, 1, 0 })
+    if flightSimMode then
+    -- Invert mouse deltas
+    dx, dy = -dx, dy
+        -- Flight simulator mode: yaw + pitch + banking
+        local right = q.rotateVector(camera.rot, {1, 0, 0})
+        local up    = q.rotateVector(camera.rot, {0, 1, 0})
+        local forward = q.rotateVector(camera.rot, {0, 0, -1})
 
-    local pitchQuat = q.fromAxisAngle(right, -dy * vertical_sensitivity)
-    local yawQuat = q.fromAxisAngle(up, -dx * horizontal_sensitivity)
+        -- Pitch (nose up/down)
+        local pitchQuat = q.fromAxisAngle(right, -dy * vertical_sensitivity)
+        camera.rot = q.multiply(pitchQuat, camera.rot)
 
-    -- Apply pitch then yaw (relative to current orientation)
-    camera.rot = q.normalize(q.multiply(yawQuat, q.multiply(pitchQuat, camera.rot)))
+        -- Yaw (turn left/right)
+        local yawQuat = q.fromAxisAngle(up, -dx * horizontal_sensitivity)
+        camera.rot = q.multiply(yawQuat, camera.rot)
+
+        -- Optional: roll/banking based on horizontal input
+        local bankQuat = q.fromAxisAngle(forward, -dx * 0.5 * horizontal_sensitivity)
+        camera.rot = q.multiply(bankQuat, camera.rot)
+
+    else
+    -- Invert mouse deltas
+    dx, dy = -dx, -dy
+        -- Shooter-style: normalized yaw/pitch without banking
+        local right = q.rotateVector(camera.rot, {1, 0, 0})
+        local up    = {0, 1, 0}  -- world up
+
+        local pitchQuat = q.fromAxisAngle(right, -dy * vertical_sensitivity)
+        local yawQuat   = q.fromAxisAngle(up, -dx * horizontal_sensitivity)
+
+        camera.rot = q.normalize(q.multiply(yawQuat, q.multiply(pitchQuat, camera.rot)))
+    end
 end
 
 local function updateNet()
@@ -194,39 +245,24 @@ end
 
 local function drawHud(w, h, cx, cy)
     -- to do: add bars on the bottom or left of the screen, white background rectangles, thinner coloured rectangle to indicate pos along the different axis with wrap around
+    love.graphics.print(love.timer.getFPS())
 end
 
 function love.draw()
-    triangleCount = 0
-    local centerX, centerY = screen.w / 2, screen.h / 2
-    love.graphics.setColor(0.2, 0.2, 0.75, 0.8)
-    love.graphics.rectangle("fill", 0, 0, screen.w, screen.h)
-    -- reset z-buffer
-    --zBuffer = {}
-    --for x = 1, screen.w do
-    --    zBuffer[x] = {}
-    --    for y = 1, screen.h do
-    --        zBuffer[x][y] = math.huge
-    --    end
-    --end
+    love.graphics.clear(0.2, 0.2, 0.75, 1) -- clear each frame
 
+    -- Sort objects if needed
     table.sort(objects, function(a, b)
         local aCam = engine.worldToCamera(a.pos, camera, q)
         local bCam = engine.worldToCamera(b.pos, camera, q)
-
-        return aCam[3] > bCam[3] -- farther first
+        return aCam[3] > bCam[3]
     end)
 
-    -- Draw objects in sorted order
     for _, obj in ipairs(objects) do
-        engine.drawObject(obj, false, camera, vector3, q, screen)
+        engine.drawObjectGPU(obj, camera, q, vector3, screen)
     end
 
-
+    -- HUD
     love.graphics.setColor(1, 1, 1)
     love.graphics.print("WASD + QE/ZC, Mouse to look, Esc to release mouse", 10, 10)
-    love.graphics.setColor(1, 0, 0, 0.5)
-    love.graphics.circle("fill", centerX, centerY, 1)
-
-    drawHud(screen.w, screen.h, centerX, centerY)
 end

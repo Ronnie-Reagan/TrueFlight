@@ -1,6 +1,22 @@
 local engine = {}
 local love = require "love"
+-- === GPU Shader Setup ===
+engine.defaultShaderCode = [[
+extern mat4 modelViewProjection;
 
+vec4 position(mat4 transform_projection, vec4 vertex_position)
+{
+    // transform vertex using our MVP matrix
+    return modelViewProjection * vertex_position;
+}
+
+vec4 effect(vec4 color, Image texture, vec2 texCoords, vec2 screenCoords)
+{
+    // pass vertex color to fragment
+    return color;
+}
+]]
+engine.defaultShader = love.graphics.newShader(engine.defaultShaderCode)
 
 --[[
 Loads an STL obj file and creates vertices/faces for it to be added to the world for rendering and simulation
@@ -89,8 +105,8 @@ function engine.checkAABBCollision(box, obj)
     local dz = math.abs(box.pos[3] - obj.pos[3])
 
     return dx <= (box.halfSize.x + obj.halfSize.x) and
-           dy <= (box.halfSize.y + obj.halfSize.y) and
-           dz <= (box.halfSize.z + obj.halfSize.z)
+        dy <= (box.halfSize.y + obj.halfSize.y) and
+        dz <= (box.halfSize.z + obj.halfSize.z)
 end
 
 -- === Camera Movement ===
@@ -135,7 +151,7 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
     camera.pos[2] = camera.pos[2] + camera.vel[2] * dt
 
     -- Update camera box
-    camera.box.pos = { camera.pos[1], camera.pos[2] - camera.box.halfSize.y, camera.pos[3] }
+    camera.box.pos = { camera.pos[1], camera.pos[2], camera.pos[3] }
 
     -- Collision with ground tiles: find highest tile under camera
     local highestY = -math.huge
@@ -168,22 +184,44 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
     return camera
 end
 
-function engine.drawTriangle(v1, v2, v3, color)
-    love.graphics.setColor(color or { 1, 1, 1 })
-    love.graphics.polygon("fill",
-        v1[1], v1[2],
-        v2[1], v2[2],
-        v3[1], v3[2]
-    )
-    love.graphics.setColor(0, 0, 0)
-    love.graphics.polygon("line",
-        v1[1], v1[2],
-        v2[1], v2[2],
-        v3[1], v3[2]
-    )
+function engine.drawTriangle(v1, v2, v3, color, screen, zBuffer)
+    color = color or { 1, 1, 1 }
+    -- Compute bounding box of triangle
+    local minX = math.max(1, math.floor(math.min(v1[1], v2[1], v3[1])))
+    local maxX = math.min(screen.w, math.ceil(math.max(v1[1], v2[1], v3[1])))
+    local minY = math.max(1, math.floor(math.min(v1[2], v2[2], v3[2])))
+    local maxY = math.min(screen.h, math.ceil(math.max(v1[2], v2[2], v3[2])))
+
+    local function edgeFunction(a, b, c)
+        return (c[1] - a[1]) * (b[2] - a[2]) - (c[2] - a[2]) * (b[1] - a[1])
+    end
+
+    local area = edgeFunction(v1, v2, v3)
+    if area == 0 then return end
+
+    for y = minY, maxY do
+        for x = minX, maxX do
+            local p = { x + 0.5, y + 0.5 }
+
+            local w0 = edgeFunction(v2, v3, p)
+            local w1 = edgeFunction(v3, v1, p)
+            local w2 = edgeFunction(v1, v2, p)
+
+            if w0 >= 0 and w1 >= 0 and w2 >= 0 then
+                w0, w1, w2 = w0 / area, w1 / area, w2 / area
+                local z = w0 * v1[3] + w1 * v2[3] + w2 * v3[3]
+
+                if z < zBuffer[x][y] then
+                    zBuffer[x][y] = z
+                    love.graphics.setColor(color)
+                    love.graphics.points(x, y)
+                end
+            end
+        end
+    end
 end
 
-function engine.drawObject(obj, skipCulling, camera, vector3, q, screen)
+function engine.drawObject(obj, skipCulling, camera, vector3, q, screen, zBuffer)
     local transformedVerts = {}
     local screenVerts = {}
 
@@ -205,14 +243,14 @@ function engine.drawObject(obj, skipCulling, camera, vector3, q, screen)
             table.insert(poly, transformedVerts[vi])
         end
 
-        poly = engine.clipPolygonToNearPlane(poly, 0.01)
+        poly = engine.clipPolygonToNearPlane(poly, 0.0001)
 
         if #poly < 3 then
             goto continue
         end
 
         -- Optional backface culling
-        if not skipCulling then
+        if skipCulling then
             local v1, v2, v3 = transformedVerts[face[1]], transformedVerts[face[2]], transformedVerts[face[3]]
             local edge1 = vector3.sub(v2, v1)
             local edge2 = vector3.sub(v3, v1)
@@ -237,7 +275,9 @@ function engine.drawObject(obj, skipCulling, camera, vector3, q, screen)
                 projected[1],
                 projected[i],
                 projected[i + 1],
-                obj.color or { 0.5, 0.5, 0.5 }
+                obj.color or { 0.5, 0.5, 0.5 },
+                screen,
+                zBuffer
             )
         end
 
@@ -245,6 +285,67 @@ function engine.drawObject(obj, skipCulling, camera, vector3, q, screen)
     end
 end
 
+function engine.perspectiveMatrix(fov, aspect, near, far)
+    local f = 1 / math.tan(fov / 2)
+    return {
+        { f / aspect, 0, 0,                               0 },
+        { 0,          f, 0,                               0 },
+        { 0,          0, (far + near) / (near - far),     -1 },
+        { 0,          0, (2 * far * near) / (near - far), 0 }
+    }
+end
+
+function engine.mat4Multiply(a, b)
+    local r = {}
+    for i = 1, 4 do
+        r[i] = {}
+        for j = 1, 4 do
+            r[i][j] = 0
+            for k = 1, 4 do
+                r[i][j] = r[i][j] + a[i][k] * b[k][j]
+            end
+        end
+    end
+    return r
+end
+
+function engine.drawObjectGPU(obj, camera, q, vector3, screen)
+    if not obj.mesh then return end
+
+    local function flattenMat4(m)
+        return {
+            m[1][1], m[2][1], m[3][1], m[4][1],
+            m[1][2], m[2][2], m[3][2], m[4][2],
+            m[1][3], m[2][3], m[3][3], m[4][3],
+            m[1][4], m[2][4], m[3][4], m[4][4]
+        }
+    end
+
+    local aspect = screen.w / screen.h
+    local proj = engine.perspectiveMatrix(camera.fov, aspect, 0.01, 1000)
+
+    local function mat4LookAt(pos, rot)
+        local f = q.rotateVector(rot, {0,0,-1})
+        local r = q.rotateVector(rot, {1,0,0})
+        local u = q.rotateVector(rot, {0,1,0})
+        return {
+            {r[1], u[1], -f[1], 0},
+            {r[2], u[2], -f[2], 0},
+            {r[3], u[3], -f[3], 0},
+            {-(r[1]*pos[1]+r[2]*pos[2]+r[3]*pos[3]),
+             -(u[1]*pos[1]+u[2]*pos[2]+u[3]*pos[3]),
+             f[1]*pos[1]+f[2]*pos[2]+f[3]*pos[3], 1},
+        }
+    end
+
+    local view = mat4LookAt(camera.pos, camera.rot)
+    local mvp = flattenMat4(engine.mat4Multiply(proj, view))
+
+    love.graphics.setShader(engine.defaultShader)
+    engine.defaultShader:send("modelViewProjection", mvp)
+    love.graphics.draw(obj.mesh)
+    love.graphics.setShader()
+end
 function engine.worldToCamera(worldPos, camera, q)
     local rel = {
         worldPos[1] - camera.pos[1],
