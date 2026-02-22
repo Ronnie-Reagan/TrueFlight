@@ -149,7 +149,7 @@ function love.update(dt)
 
     while event do
         if event.type == "receive" then
-            networking.handlePacket(event.data)
+            networking.handlePacket(event.data, peers, objects, q)
         end
 
         event = relay:service()
