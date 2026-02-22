@@ -1,6 +1,11 @@
 local q = require("quat")
 local vector3 = require("vector3")
 local love = love
+local enet = require "enet"
+
+local hostAddy = "ecosim.donreagan.ca:1988"
+local relay = enet.host_create()
+local relayServer = relay:connect(hostAddy)
 
 --[[
 Notes:
@@ -42,6 +47,13 @@ function love.load()
         [1] = {
             model = cubeModel,
             pos = { 0, 0, 10 },
+            rot = q.identity(),
+            color = { 0.9, 0.4, 0.1 },
+            isSolid = true
+        },
+        [2] = {
+            model = cubeModel,
+            pos = { 50, 10, 10 },
             rot = q.identity(),
             color = { 0.9, 0.4, 0.1 },
             isSolid = true
@@ -152,6 +164,29 @@ function love.mousemoved(x, y, dx, dy)
     camera.rot = q.normalize(q.multiply(yawQuat, q.multiply(pitchQuat, camera.rot)))
 end
 
+players = players or {}
+function handlePacket(data)
+    local parts = {}
+    for p in string.gmatch(data, "([^|]+)") do
+        table.insert(parts, p)
+    end
+
+    if parts[1] == "STATE" then
+        -- simple example using peer index as ID later if needed
+        objects[2].pos = {
+                tonumber(parts[2]),
+                tonumber(parts[3]),
+                tonumber(parts[4])
+            }
+            objects[2].rot = {
+                w = tonumber(parts[5]),
+                x = tonumber(parts[6]),
+                y = tonumber(parts[7]),
+                z = tonumber(parts[8])
+            }
+    end
+end
+local event = relay:service()
 -- === Camera Movement ===
 function love.update(dt)
     local speed = camera.speed * dt
@@ -199,6 +234,30 @@ function love.update(dt)
         local roll = q.fromAxisAngle(q.rotateVector(camera.rot, { 0, 0, 0.5 }), math.rad(2.5))
         camera.rot = q.normalize(q.multiply(roll, camera.rot))
     end
+    if relayServer then
+        local packet = string.format(
+            "STATE|%f|%f|%f|%f|%f|%f|%f",
+            camera.pos[1],
+            camera.pos[2],
+            camera.pos[3],
+            camera.rot.w,
+            camera.rot.x,
+            camera.rot.y,
+            camera.rot.z
+        )
+
+        relayServer:send(packet)
+    end
+    
+    local event = relay:service()
+
+    while event do
+        if event.type == "receive" then
+            handlePacket(event.data)
+        end
+
+        event = relay:service()
+    end
 end
 
 -- === Input Management ===
@@ -238,7 +297,6 @@ function love.mousefocus(focused)
 end
 
 local function drawTriangle(v1, v2, v3, color)
-    -- Just draw the triangle directly
     love.graphics.setColor(color or { 1, 1, 1 })
     love.graphics.polygon("fill",
         v1[1], v1[2],
