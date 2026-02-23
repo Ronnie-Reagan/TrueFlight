@@ -68,7 +68,7 @@ function love.load()
         pos = { 0, 10, -5 },
         rot = q.identity(),
         speed = 10,
-        fov = math.rad(90),
+        fov = math.rad(60),
         vel = { 0, 0, 0 }, -- current velocity
         onGround = false,  -- contacting
         gravity = -9.81,   -- units/sec^2
@@ -77,7 +77,7 @@ function love.load()
         maxSpeed = 50,
         box = {
             halfSize = { x = 2, y = 2, z = 2 }, -- width/height/depth half extents
-            pos = { 0, 10, -5 },                       -- center at camera
+            pos = { 0, 10, -5 },                -- center at camera
             isSolid = true
         }
     }
@@ -105,33 +105,36 @@ function love.load()
     end
 
     -- When initializing objects
-for _, obj in ipairs(objects) do
-    if obj.model and obj.model.vertices then
-        local verts, indices = {}, {}
+    for _, obj in ipairs(objects) do
+        if obj.model and obj.model.vertices then
+            local verts, indices = {}, {}
 
-        for i, v in ipairs(obj.model.vertices) do
-            verts[i] = {
-                v[1], v[2], v[3],
-                0, 0,
-                obj.color[1] or 1,
-                obj.color[2] or 1,
-                obj.color[3] or 1,
-                1
-            }
-        end
-
-        for _, face in ipairs(obj.model.faces) do
-            for i = 2, #face - 1 do
-                table.insert(indices, face[1])
-                table.insert(indices, face[i])
-                table.insert(indices, face[i+1])
+            for i, v in ipairs(obj.model.vertices) do
+                verts[i] = {
+                    v[1], v[2], v[3],
+                    0, 0,
+                    obj.color[1] or 1,
+                    obj.color[2] or 1,
+                    obj.color[3] or 1,
+                    1
+                }
             end
-        end
 
-        obj.mesh = love.graphics.newMesh(verts, "triangles", "static")
-        obj.mesh:setVertexMap(indices)
+            for _, face in ipairs(obj.model.faces) do
+                for i = 2, #face - 1 do
+                    table.insert(indices, face[1])
+                    table.insert(indices, face[i])
+                    table.insert(indices, face[i + 1])
+                end
+            end
+
+            obj.mesh = love.graphics.newMesh(verts, "triangles", "static")
+            obj.mesh:setVertexMap(indices)
+        end
     end
-end
+
+    love.window.setMode(width, height, { depth = 24 })
+    love.graphics.setDepthMode("less", true)
 end
 
 -- === Mouse Look ===
@@ -143,36 +146,35 @@ function love.mousemoved(x, y, dx, dy)
     local vertical_sensitivity   = 0.001
 
     if flightSimMode then
-    -- Invert mouse deltas
-    dx, dy = -dx, dy
+        -- Invert mouse deltas
+        dx, dy          = -dx, dy
         -- Flight simulator mode: yaw + pitch + banking
-        local right = q.rotateVector(camera.rot, {1, 0, 0})
-        local up    = q.rotateVector(camera.rot, {0, 1, 0})
-        local forward = q.rotateVector(camera.rot, {0, 0, -1})
+        local right     = q.rotateVector(camera.rot, { 1, 0, 0 })
+        local up        = q.rotateVector(camera.rot, { 0, 1, 0 })
+        local forward   = q.rotateVector(camera.rot, { 0, 0, -1 })
 
         -- Pitch (nose up/down)
         local pitchQuat = q.fromAxisAngle(right, -dy * vertical_sensitivity)
-        camera.rot = q.multiply(pitchQuat, camera.rot)
+        camera.rot      = q.multiply(pitchQuat, camera.rot)
 
         -- Yaw (turn left/right)
-        local yawQuat = q.fromAxisAngle(up, -dx * horizontal_sensitivity)
-        camera.rot = q.multiply(yawQuat, camera.rot)
+        local yawQuat   = q.fromAxisAngle(up, -dx * horizontal_sensitivity)
+        camera.rot      = q.multiply(yawQuat, camera.rot)
 
         -- Optional: roll/banking based on horizontal input
-        local bankQuat = q.fromAxisAngle(forward, -dx * 0.5 * horizontal_sensitivity)
-        camera.rot = q.multiply(bankQuat, camera.rot)
-
+        local bankQuat  = q.fromAxisAngle(forward, -dx * 0.5 * horizontal_sensitivity)
+        camera.rot      = q.multiply(bankQuat, camera.rot)
     else
-    -- Invert mouse deltas
-    dx, dy = -dx, -dy
+        -- Invert mouse deltas
+        dx, dy          = -dx, -dy
         -- Shooter-style: normalized yaw/pitch without banking
-        local right = q.rotateVector(camera.rot, {1, 0, 0})
-        local up    = {0, 1, 0}  -- world up
+        local right     = q.rotateVector(camera.rot, { 1, 0, 0 })
+        local up        = { 0, 1, 0 } -- world up
 
         local pitchQuat = q.fromAxisAngle(right, -dy * vertical_sensitivity)
         local yawQuat   = q.fromAxisAngle(up, -dx * horizontal_sensitivity)
 
-        camera.rot = q.normalize(q.multiply(yawQuat, q.multiply(pitchQuat, camera.rot)))
+        camera.rot      = q.normalize(q.multiply(yawQuat, q.multiply(pitchQuat, camera.rot)))
     end
 end
 
@@ -247,22 +249,23 @@ local function drawHud(w, h, cx, cy)
     -- to do: add bars on the bottom or left of the screen, white background rectangles, thinner coloured rectangle to indicate pos along the different axis with wrap around
     love.graphics.print(love.timer.getFPS())
 end
-
 function love.draw()
-    love.graphics.clear(0.2, 0.2, 0.75, 1) -- clear each frame
+    love.graphics.clear(0.2, 0.2, 0.75, 1, true) -- clear each frame
 
     -- Sort objects if needed
-    table.sort(objects, function(a, b)
-        local aCam = engine.worldToCamera(a.pos, camera, q)
-        local bCam = engine.worldToCamera(b.pos, camera, q)
-        return aCam[3] > bCam[3]
-    end)
+    --table.sort(objects, function(a, b)
+    --    local aCam = engine.worldToCamera(a.pos, camera, q)
+    --    local bCam = engine.worldToCamera(b.pos, camera, q)
+    --    return aCam[3] > bCam[3]
+    --end)
 
     for _, obj in ipairs(objects) do
-        engine.drawObjectGPU(obj, camera, q, vector3, screen)
+        if obj ~= camera.box then
+            engine.drawObjectGPU(obj, camera, q, vector3, screen)
+        end
     end
 
     -- HUD
     love.graphics.setColor(1, 1, 1)
-    love.graphics.print("WASD + QE/ZC, Mouse to look, Esc to release mouse", 10, 10)
+    love.graphics.print("WASD + QE/ZC, Mouse to look, Esc to release mouse\nFPS" .. love.timer.getFPS(), 10, 10)
 end

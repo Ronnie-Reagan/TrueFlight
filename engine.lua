@@ -310,31 +310,32 @@ function engine.mat4Multiply(a, b)
 end
 
 function engine.drawObjectGPU(obj, camera, q, vector3, screen)
-    if not obj.mesh then return end
-
+    if not obj.mesh then
+        return
+    end
     local function flattenMat4(m)
         return {
-            m[1][1], m[2][1], m[3][1], m[4][1],
-            m[1][2], m[2][2], m[3][2], m[4][2],
-            m[1][3], m[2][3], m[3][3], m[4][3],
-            m[1][4], m[2][4], m[3][4], m[4][4]
+            m[1][1], m[1][2], m[1][3], m[1][4],
+            m[2][1], m[2][2], m[2][3], m[2][4],
+            m[3][1], m[3][2], m[3][3], m[3][4],
+            m[4][1], m[4][2], m[4][3], m[4][4]
         }
     end
 
     local aspect = screen.w / screen.h
-    local proj = engine.perspectiveMatrix(camera.fov, aspect, 0.01, 1000)
+    local proj = engine.perspectiveMatrix(camera.fov, aspect, 20, 1000)
 
     local function mat4LookAt(pos, rot)
-        local f = q.rotateVector(rot, {0,0,-1})
-        local r = q.rotateVector(rot, {1,0,0})
-        local u = q.rotateVector(rot, {0,1,0})
+        local f = q.rotateVector(rot, { 0, 0, -1 })
+        local r = q.rotateVector(rot, { 1, 0, 0 })
+        local u = q.rotateVector(rot, { 0, 1, 0 })
         return {
-            {r[1], u[1], -f[1], 0},
-            {r[2], u[2], -f[2], 0},
-            {r[3], u[3], -f[3], 0},
-            {-(r[1]*pos[1]+r[2]*pos[2]+r[3]*pos[3]),
-             -(u[1]*pos[1]+u[2]*pos[2]+u[3]*pos[3]),
-             f[1]*pos[1]+f[2]*pos[2]+f[3]*pos[3], 1},
+            { r[1], u[1], -f[1], 0 },
+            { r[2], u[2], -f[2], 0 },
+            { r[3], u[3], -f[3], 0 },
+            { -(r[1] * pos[1] + r[2] * pos[2] + r[3] * pos[3]),
+                -(u[1] * pos[1] + u[2] * pos[2] + u[3] * pos[3]),
+                f[1] * pos[1] + f[2] * pos[2] + f[3] * pos[3], 1 },
         }
     end
 
@@ -346,6 +347,7 @@ function engine.drawObjectGPU(obj, camera, q, vector3, screen)
     love.graphics.draw(obj.mesh)
     love.graphics.setShader()
 end
+
 function engine.worldToCamera(worldPos, camera, q)
     local rel = {
         worldPos[1] - camera.pos[1],
