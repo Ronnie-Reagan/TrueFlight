@@ -97,7 +97,7 @@ end
 --[[
 Notes:
 
-positions are {x = left/right(width), y = up/down(height), z = in/out(depth)} IN WORLD SPACE!!
+positions are {x = left/right(width), y = up/down(height), z = in/out(depth)} IN CAMERA SPACE!!
 ]]
 -- Procedurally generate a ground grid of cubes
 local function generateGround(tileSize, gridCount, baseHeight)
@@ -1301,9 +1301,8 @@ function love.focus(focused)
 end
 
 local function drawHud(w, h, cx, cy)
-	-- to do: add bars on the bottom or left of the screen, white background rectangles, thinner coloured rectangle to indicate pos along the different axis with wrap around
-end
 
+end
 function love.draw()
 	triangleCount = 0
 	local centerX, centerY = screen.w / 2, screen.h / 2
@@ -1384,4 +1383,5 @@ function love.resize(w, h)
 
 	frameImage = nil
 	logger.log(string.format("Window resized to %dx%d", w, h))
+
 end

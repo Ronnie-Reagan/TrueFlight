@@ -1,6 +1,22 @@
 local engine = {}
 local love = require "love"
+-- === GPU Shader Setup ===
+engine.defaultShaderCode = [[
+extern mat4 modelViewProjection;
 
+vec4 position(mat4 transform_projection, vec4 vertex_position)
+{
+    // transform vertex using our MVP matrix
+    return modelViewProjection * vertex_position;
+}
+
+vec4 effect(vec4 color, Image texture, vec2 texCoords, vec2 screenCoords)
+{
+    // pass vertex color to fragment
+    return color;
+}
+]]
+engine.defaultShader = love.graphics.newShader(engine.defaultShaderCode)
 
 --[[
 Loads an STL obj file and creates vertices/faces for it to be added to the world for rendering and simulation
@@ -138,7 +154,7 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
     camera.pos[2] = camera.pos[2] + camera.vel[2] * dt
 
     -- Update camera box
-    camera.box.pos = { camera.pos[1], camera.pos[2] - camera.box.halfSize.y, camera.pos[3] }
+    camera.box.pos = { camera.pos[1], camera.pos[2], camera.pos[3] }
 
     -- Collision with ground tiles: find highest tile under camera
     local highestY = -math.huge
@@ -243,14 +259,14 @@ function engine.drawObject(obj, skipCulling, camera, vector3, q, screen, zBuffer
         end
         if not faceValid then goto continue end
 
-        poly = engine.clipPolygonToNearPlane(poly, 0.01)
+        poly = engine.clipPolygonToNearPlane(poly, 0.0001)
 
         if #poly < 3 then
             goto continue
         end
 
         -- Optional backface culling
-        if not skipCulling then
+        if skipCulling then
             local v1, v2, v3 = transformedVerts[face[1]], transformedVerts[face[2]], transformedVerts[face[3]]
             local edge1 = vector3.sub(v2, v1)
             local edge2 = vector3.sub(v3, v1)
@@ -285,6 +301,69 @@ function engine.drawObject(obj, skipCulling, camera, vector3, q, screen, zBuffer
         ::continue::
     end
     return imageData
+end
+
+function engine.perspectiveMatrix(fov, aspect, near, far)
+    local f = 1 / math.tan(fov / 2)
+    return {
+        { f / aspect, 0, 0,                               0 },
+        { 0,          f, 0,                               0 },
+        { 0,          0, (far + near) / (near - far),     -1 },
+        { 0,          0, (2 * far * near) / (near - far), 0 }
+    }
+end
+
+function engine.mat4Multiply(a, b)
+    local r = {}
+    for i = 1, 4 do
+        r[i] = {}
+        for j = 1, 4 do
+            r[i][j] = 0
+            for k = 1, 4 do
+                r[i][j] = r[i][j] + a[i][k] * b[k][j]
+            end
+        end
+    end
+    return r
+end
+
+function engine.drawObjectGPU(obj, camera, q, vector3, screen)
+    if not obj.mesh then
+        return
+    end
+    local function flattenMat4(m)
+        return {
+            m[1][1], m[1][2], m[1][3], m[1][4],
+            m[2][1], m[2][2], m[2][3], m[2][4],
+            m[3][1], m[3][2], m[3][3], m[3][4],
+            m[4][1], m[4][2], m[4][3], m[4][4]
+        }
+    end
+
+    local aspect = screen.w / screen.h
+    local proj = engine.perspectiveMatrix(camera.fov, aspect, 20, 1000)
+
+    local function mat4LookAt(pos, rot)
+        local f = q.rotateVector(rot, { 0, 0, -1 })
+        local r = q.rotateVector(rot, { 1, 0, 0 })
+        local u = q.rotateVector(rot, { 0, 1, 0 })
+        return {
+            { r[1], u[1], -f[1], 0 },
+            { r[2], u[2], -f[2], 0 },
+            { r[3], u[3], -f[3], 0 },
+            { -(r[1] * pos[1] + r[2] * pos[2] + r[3] * pos[3]),
+                -(u[1] * pos[1] + u[2] * pos[2] + u[3] * pos[3]),
+                f[1] * pos[1] + f[2] * pos[2] + f[3] * pos[3], 1 },
+        }
+    end
+
+    local view = mat4LookAt(camera.pos, camera.rot)
+    local mvp = flattenMat4(engine.mat4Multiply(proj, view))
+
+    love.graphics.setShader(engine.defaultShader)
+    engine.defaultShader:send("modelViewProjection", mvp)
+    love.graphics.draw(obj.mesh)
+    love.graphics.setShader()
 end
 
 function engine.worldToCamera(worldPos, camera, q)
