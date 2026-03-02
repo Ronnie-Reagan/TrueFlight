@@ -110,44 +110,93 @@ function engine.checkAABBCollision(box, obj)
 end
 
 -- === Camera Movement ===
-function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
+function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, inputState)
+    inputState = inputState or {}
+
+    local function axis(positive, negative)
+        local value = 0
+        if positive then
+            value = value + 1
+        end
+        if negative then
+            value = value - 1
+        end
+        return value
+    end
+
     local speed = camera.speed * dt
     local forward, right, up = engine.getCameraBasis(camera, q, vector3)
 
     if flightSimMode then
-        -- Flight mode: throttle & roll
-        camera.thrust = 0
-        if love.keyboard.isDown("w") then camera.thrust = camera.thrust + 1 end
-        if love.keyboard.isDown("s") then camera.thrust = camera.thrust - 1 end
-
-        camera.throttle = math.max(0, math.min(camera.throttle + (camera.thrust or 0) * dt, camera.maxSpeed))
-        for i = 1, 3 do
-            camera.pos[i] = camera.pos[i] + forward[i] * camera.throttle * dt
+        local throttleAxis = axis(inputState.flightThrottleUp, inputState.flightThrottleDown)
+        local throttleAccel = camera.throttleAccel or 24
+        local maxSpeed = camera.maxSpeed or 50
+        if inputState.flightAfterburner then
+            maxSpeed = maxSpeed * (camera.afterburnerMultiplier or 1.6)
         end
 
-        if love.keyboard.isDown("q") then
-            local roll = q.fromAxisAngle(forward, math.rad(45 * dt))
-            camera.rot = q.normalize(q.multiply(roll, camera.rot))
-        elseif love.keyboard.isDown("e") then
-            local roll = q.fromAxisAngle(forward, -math.rad(45 * dt))
-            camera.rot = q.normalize(q.multiply(roll, camera.rot))
+        camera.throttle = math.max(0, math.min(camera.throttle + throttleAxis * throttleAccel * dt, maxSpeed))
+        if inputState.flightAirBrakes then
+            local brakeStrength = camera.airBrakeStrength or 45
+            camera.throttle = math.max(0, camera.throttle - brakeStrength * dt)
+        end
+
+        local pitchAxis = axis(inputState.flightPitchDown, inputState.flightPitchUp)
+        local yawAxis = axis(inputState.flightYawRight, inputState.flightYawLeft)
+        local rollAxis = axis(inputState.flightRollLeft, inputState.flightRollRight)
+
+        if pitchAxis ~= 0 then
+            local pitchRate = math.rad(camera.flightPitchRate or 60)
+            local pitchQuat = q.fromAxisAngle(right, pitchAxis * pitchRate * dt)
+            camera.rot = q.normalize(q.multiply(pitchQuat, camera.rot))
+        end
+        if yawAxis ~= 0 then
+            local yawRate = math.rad(camera.flightYawRate or 70)
+            local yawQuat = q.fromAxisAngle(up, yawAxis * yawRate * dt)
+            camera.rot = q.normalize(q.multiply(yawQuat, camera.rot))
+        end
+        if rollAxis ~= 0 then
+            local rollRate = math.rad(camera.flightRollRate or 90)
+            local rollQuat = q.fromAxisAngle(forward, rollAxis * rollRate * dt)
+            camera.rot = q.normalize(q.multiply(rollQuat, camera.rot))
+        end
+
+        forward = vector3.normalizeVec(q.rotateVector(camera.rot, { 0, 0, 1 }))
+        for i = 1, 3 do
+            camera.pos[i] = camera.pos[i] + forward[i] * camera.throttle * dt
         end
         return camera
     end
 
     -- === Ground movement ===
-    -- Horizontal input
     local moveDir = { 0, 0, 0 }
     local groundForward = vector3.normalizeVec({ forward[1], 0, forward[3] })
     local groundRight = vector3.normalizeVec({ right[1], 0, right[3] })
-    if love.keyboard.isDown("w") then moveDir = vector3.add(moveDir, groundForward) end
-    if love.keyboard.isDown("s") then moveDir = vector3.sub(moveDir, groundForward) end
-    if love.keyboard.isDown("d") then moveDir = vector3.add(moveDir, groundRight) end
-    if love.keyboard.isDown("a") then moveDir = vector3.sub(moveDir, groundRight) end
+    if inputState.walkForward then
+        moveDir = vector3.add(moveDir, groundForward)
+    end
+    if inputState.walkBackward then
+        moveDir = vector3.sub(moveDir, groundForward)
+    end
+    if inputState.walkStrafeRight then
+        moveDir = vector3.add(moveDir, groundRight)
+    end
+    if inputState.walkStrafeLeft then
+        moveDir = vector3.sub(moveDir, groundRight)
+    end
     moveDir = vector3.normalizeVec(moveDir)
 
-    camera.pos[1] = camera.pos[1] + moveDir[1] * speed
-    camera.pos[3] = camera.pos[3] + moveDir[3] * speed
+    local sprintMultiplier = inputState.walkSprint and (camera.sprintMultiplier or 1.6) or 1
+    local walkSpeed = speed * sprintMultiplier
+    camera.pos[1] = camera.pos[1] + moveDir[1] * walkSpeed
+    camera.pos[3] = camera.pos[3] + moveDir[3] * walkSpeed
+
+    local tiltAxis = axis(inputState.walkTiltLeft, inputState.walkTiltRight)
+    if tiltAxis ~= 0 then
+        local tiltRate = math.rad(camera.walkTiltRate or 35)
+        local tiltQuat = q.fromAxisAngle(forward, tiltAxis * tiltRate * dt)
+        camera.rot = q.normalize(q.multiply(tiltQuat, camera.rot))
+    end
 
     -- Gravity
     camera.vel[2] = camera.vel[2] + camera.gravity * dt
@@ -164,7 +213,9 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
             local dz = math.abs(camera.box.pos[3] - obj.pos[3])
             if dx <= obj.halfSize.x + camera.box.halfSize.x and dz <= obj.halfSize.z + camera.box.halfSize.z then
                 local topY = obj.pos[2] + obj.halfSize.y
-                if topY > highestY then highestY = topY end
+                if topY > highestY then
+                    highestY = topY
+                end
             end
         end
     end
@@ -178,8 +229,7 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
         camera.onGround = false
     end
 
-    -- Jump
-    if love.keyboard.isDown("space") and camera.onGround then
+    if inputState.walkJump and camera.onGround then
         camera.vel[2] = camera.jumpSpeed
         camera.onGround = false
     end
