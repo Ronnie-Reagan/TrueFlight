@@ -19,6 +19,25 @@ local screen, camera, groundObject, triangleCount, frameImage, renderMode, gpuEr
 local useGpuRenderer = true
 local perfElapsed, perfFrames, perfLoggedLowFps = 0, 0, false
 local zBuffer = {}
+local mouseSensitivity = 0.001
+local pauseTitleFont, pauseItemFont
+
+local pauseMenu = {
+	active = false,
+	selected = 1,
+	itemBounds = {},
+	items = {
+		{ id = "resume", label = "Resume", kind = "action" },
+		{ id = "flight", label = "Flight Mode", kind = "toggle" },
+		{ id = "renderer", label = "Renderer", kind = "toggle" },
+		{ id = "speed", label = "Move Speed", kind = "range", min = 2, max = 30, step = 1 },
+		{ id = "fov", label = "Field of View", kind = "range", min = 60, max = 120, step = 5 },
+		{ id = "sensitivity", label = "Mouse Sensitivity", kind = "range", min = 0.0004, max = 0.004, step = 0.0002 },
+		{ id = "reset", label = "Reset Camera", kind = "action" },
+		{ id = "reconnect", label = "Reconnect Relay", kind = "action" },
+		{ id = "quit", label = "Quit Game", kind = "action" }
+	}
+}
 
 --[[
 Notes:
@@ -53,6 +72,333 @@ local function generateGround(tileSize, gridCount, baseHeight)
 	return tiles
 end
 
+local function clamp(value, minValue, maxValue)
+	if value < minValue then
+		return minValue
+	end
+	if value > maxValue then
+		return maxValue
+	end
+	return value
+end
+
+local function setMouseCapture(enabled)
+	love.mouse.setRelativeMode(enabled)
+	pcall(love.mouse.setVisible, not enabled)
+	relative = enabled
+end
+
+local function setFlightMode(enabled)
+	flightSimMode = enabled and true or false
+	if not flightSimMode and camera then
+		camera.throttle = 0
+	end
+end
+
+local function setRendererPreference(enableGpu)
+	local desiredGpu = enableGpu and true or false
+	if desiredGpu and not renderer.isReady() then
+		useGpuRenderer = false
+		renderMode = "CPU"
+		logger.log("GPU renderer unavailable; staying in CPU mode.")
+		return false
+	end
+
+	local oldMode = renderMode
+	useGpuRenderer = desiredGpu
+	renderMode = (useGpuRenderer and renderer.isReady()) and "GPU" or "CPU"
+	if oldMode ~= renderMode then
+		logger.log("Render mode toggled to " .. renderMode)
+	end
+	return useGpuRenderer
+end
+
+local function resetCameraTransform()
+	if not camera then
+		return
+	end
+
+	camera.pos = { 0, 0, -5 }
+	camera.rot = q.identity()
+	camera.vel = { 0, 0, 0 }
+	camera.throttle = 0
+	camera.onGround = false
+	if camera.box and camera.box.halfSize then
+		camera.box.pos = { camera.pos[1], camera.pos[2] - camera.box.halfSize.y, camera.pos[3] }
+	end
+	logger.log("Camera transform reset.")
+end
+
+local function clearPeerObjects()
+	for i = #objects, 1, -1 do
+		if objects[i].id then
+			table.remove(objects, i)
+		end
+	end
+	peers = {}
+end
+
+local function getRelayStatus()
+	if not relay then
+		return "Host down"
+	end
+	if not relayServer then
+		return "Disconnected"
+	end
+
+	local ok, state = pcall(function()
+		return relayServer:state()
+	end)
+	if not ok then
+		return "Unknown"
+	end
+	if state == "connected" then
+		return "Connected"
+	end
+	return tostring(state)
+end
+
+local function reconnectRelay()
+	if not relay then
+		relay = enet.host_create()
+		if not relay then
+			logger.log("ENet host creation failed; reconnect unavailable.")
+			return false
+		end
+	end
+
+	if relayServer then
+		pcall(function()
+			relayServer:disconnect_now()
+		end)
+		relayServer = nil
+	end
+
+	clearPeerObjects()
+
+	local ok, peerOrErr = pcall(function()
+		return relay:connect(hostAddy)
+	end)
+	if not ok then
+		logger.log("Relay reconnect failed: " .. tostring(peerOrErr))
+		return false
+	end
+
+	relayServer = peerOrErr
+	if relayServer then
+		logger.log("Reconnecting to relay server: " .. hostAddy)
+		return true
+	end
+
+	logger.log("Relay reconnect failed: no peer handle returned.")
+	return false
+end
+
+local function refreshUiFonts()
+	local baseSize = math.max(14, math.floor(screen.h * 0.023))
+	pauseTitleFont = love.graphics.newFont(math.max(24, baseSize + 8))
+	pauseItemFont = love.graphics.newFont(baseSize)
+end
+
+local setPauseState
+
+local function getPauseItemValue(item)
+	if item.id == "flight" then
+		return flightSimMode and "On" or "Off"
+	end
+	if item.id == "renderer" then
+		if renderer.isReady() then
+			return useGpuRenderer and "GPU" or "CPU"
+		end
+		return "CPU (GPU unavailable)"
+	end
+	if item.id == "speed" and camera then
+		return string.format("%.1f", camera.speed)
+	end
+	if item.id == "fov" and camera then
+		local fovDeg = math.deg(camera.fov)
+		return string.format("%d deg", math.floor(fovDeg + 0.5))
+	end
+	if item.id == "sensitivity" then
+		return string.format("%.4f", mouseSensitivity)
+	end
+	if item.id == "reconnect" then
+		return getRelayStatus()
+	end
+	return ""
+end
+
+local function adjustPauseItem(item, direction)
+	if direction == 0 then
+		return
+	end
+
+	if item.id == "speed" and camera then
+		camera.speed = clamp(camera.speed + item.step * direction, item.min, item.max)
+		return
+	end
+
+	if item.id == "fov" and camera then
+		local fovDeg = math.deg(camera.fov)
+		fovDeg = clamp(fovDeg + item.step * direction, item.min, item.max)
+		camera.fov = math.rad(fovDeg)
+		return
+	end
+
+	if item.id == "sensitivity" then
+		local nextValue = clamp(mouseSensitivity + item.step * direction, item.min, item.max)
+		mouseSensitivity = math.floor(nextValue * 10000 + 0.5) / 10000
+	end
+end
+
+local function activatePauseItem(item)
+	if item.kind == "range" then
+		adjustPauseItem(item, 1)
+		return
+	end
+
+	if item.id == "resume" then
+		setPauseState(false)
+	elseif item.id == "flight" then
+		setFlightMode(not flightSimMode)
+	elseif item.id == "renderer" then
+		setRendererPreference(not useGpuRenderer)
+	elseif item.id == "reset" then
+		resetCameraTransform()
+	elseif item.id == "reconnect" then
+		reconnectRelay()
+	elseif item.id == "quit" then
+		love.event.quit()
+	end
+end
+
+local function movePauseSelection(delta)
+	local itemCount = #pauseMenu.items
+	pauseMenu.selected = ((pauseMenu.selected - 1 + delta) % itemCount) + 1
+end
+
+local function adjustSelectedPauseItem(direction)
+	local item = pauseMenu.items[pauseMenu.selected]
+	if not item then
+		return
+	end
+	if item.kind == "range" then
+		adjustPauseItem(item, direction)
+	elseif item.kind == "toggle" and direction ~= 0 then
+		activatePauseItem(item)
+	end
+end
+
+local function activateSelectedPauseItem()
+	local item = pauseMenu.items[pauseMenu.selected]
+	if item then
+		activatePauseItem(item)
+	end
+end
+
+local function handlePauseMenuMouseClick(x, y)
+	for i, bounds in ipairs(pauseMenu.itemBounds) do
+		if x >= bounds.x and x <= bounds.x + bounds.w and y >= bounds.y and y <= bounds.y + bounds.h then
+			pauseMenu.selected = i
+			local item = pauseMenu.items[i]
+			if item and item.kind == "range" then
+				local direction = (x >= (bounds.x + bounds.w * 0.5)) and 1 or -1
+				adjustPauseItem(item, direction)
+			elseif item then
+				activatePauseItem(item)
+			end
+			return
+		end
+	end
+end
+
+setPauseState = function(paused)
+	if pauseMenu.active == paused then
+		return
+	end
+
+	pauseMenu.active = paused and true or false
+	if pauseMenu.active then
+		pauseMenu.selected = 1
+		pauseMenu.itemBounds = {}
+		setMouseCapture(false)
+		logger.log("Pause menu opened.")
+	else
+		setMouseCapture(true)
+		logger.log("Pause menu closed.")
+	end
+end
+
+local function drawPauseMenu()
+	local rowH = math.max(28, math.min(40, math.floor((screen.h - 190) / #pauseMenu.items)))
+	local topPad = 56
+	local bottomPad = 28
+	local panelW = math.min(560, screen.w * 0.82)
+	local panelH = topPad + #pauseMenu.items * rowH + bottomPad
+	local panelX = (screen.w - panelW) / 2
+	local panelY = (screen.h - panelH) / 2
+	local rowX = panelX + 18
+	local rowW = panelW - 36
+
+	love.graphics.setColor(0, 0, 0, 0.68)
+	love.graphics.rectangle("fill", 0, 0, screen.w, screen.h)
+
+	love.graphics.setColor(0.08, 0.08, 0.1, 0.95)
+	love.graphics.rectangle("fill", panelX, panelY, panelW, panelH, 8, 8)
+	love.graphics.setColor(1, 1, 1, 0.2)
+	love.graphics.rectangle("line", panelX, panelY, panelW, panelH, 8, 8)
+
+	local oldFont = love.graphics.getFont()
+	if pauseTitleFont then
+		love.graphics.setFont(pauseTitleFont)
+	end
+	love.graphics.setColor(1, 1, 1, 1)
+	love.graphics.printf("PAUSED", panelX, panelY + 14, panelW, "center")
+
+	if pauseItemFont then
+		love.graphics.setFont(pauseItemFont)
+	end
+
+	pauseMenu.itemBounds = {}
+	local rowTextHeight = love.graphics.getFont():getHeight()
+	for i, item in ipairs(pauseMenu.items) do
+		local rowY = panelY + topPad + (i - 1) * rowH
+		local rowHeight = rowH - 4
+		local rowTextY = rowY + math.floor((rowHeight - rowTextHeight) / 2)
+		local selected = i == pauseMenu.selected
+		local value = getPauseItemValue(item)
+
+		if selected then
+			love.graphics.setColor(0.22, 0.28, 0.42, 0.95)
+		else
+			love.graphics.setColor(0.15, 0.16, 0.2, 0.9)
+		end
+		love.graphics.rectangle("fill", rowX, rowY, rowW, rowHeight, 6, 6)
+
+		love.graphics.setColor(1, 1, 1, 1)
+		love.graphics.print(item.label, rowX + 12, rowTextY)
+		if item.kind == "range" then
+			value = "< " .. value .. " >"
+		end
+		if value ~= "" then
+			love.graphics.printf(value, rowX + 12, rowTextY, rowW - 24, "right")
+		end
+
+		pauseMenu.itemBounds[i] = { x = rowX, y = rowY, w = rowW, h = rowHeight }
+	end
+
+	love.graphics.setColor(1, 1, 1, 0.85)
+	love.graphics.printf(
+		"Arrow keys / WASD to navigate, Enter to select, Left/Right to adjust, Esc to resume",
+		panelX + 18,
+		panelY + panelH - 22,
+		panelW - 36,
+		"center"
+	)
+
+	love.graphics.setFont(oldFont)
+end
+
 -- === Initial Configuration ===
 function love.load()
 	-- 80% screen size
@@ -64,7 +410,7 @@ function love.load()
 	if not modeOk then
 		love.window.setMode(width, height, { vsync = false })
 	end
-	love.mouse.setRelativeMode(true)
+	setMouseCapture(true)
 
 	logger.reset()
 	logger.log("Booting Don's 3D Engine")
@@ -77,6 +423,7 @@ function love.load()
 		w = width,
 		h = height
 	}
+	refreshUiFonts()
 
 	camera = {
 		pos = { 0, 0, -5 },
@@ -99,6 +446,9 @@ function love.load()
 	renderMode = "CPU"
 	gpuErrorLogged = false
 	perfElapsed, perfFrames, perfLoggedLowFps = 0, 0, false
+	pauseMenu.active = false
+	pauseMenu.selected = 1
+	pauseMenu.itemBounds = {}
 
 	-- creating the cube's object
 	-- disabled now that other players can join allowing for non-static testing of latency and culling/depth ordering
@@ -153,15 +503,13 @@ function love.mousemoved(x, y, dx, dy)
 		return
 	end
 	x, y, dx, dy = -x, -y, -dx, -dy
-	local horizontal_sensitivity = 0.001
-	local vertical_sensitivity = 0.001
 
 	-- Rotate around camera's local Y axis (yaw) and local X axis (pitch)
 	local right = q.rotateVector(camera.rot, { 1, 0, 0 })
 	local up = q.rotateVector(camera.rot, { 0, 1, 0 })
 
-	local pitchQuat = q.fromAxisAngle(right, -dy * vertical_sensitivity)
-	local yawQuat = q.fromAxisAngle(up, -dx * horizontal_sensitivity)
+	local pitchQuat = q.fromAxisAngle(right, -dy * mouseSensitivity)
+	local yawQuat = q.fromAxisAngle(up, -dx * mouseSensitivity)
 
 	-- Apply pitch then yaw (relative to current orientation)
 	camera.rot = q.normalize(q.multiply(yawQuat, q.multiply(pitchQuat, camera.rot)))
@@ -195,44 +543,68 @@ local function updateNet()
 	end
 end
 
--- === Camera Movement ===
-function love.update(dt)
-	camera = engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
-	updateNet()
-
-	perfElapsed = perfElapsed + dt
-	perfFrames = perfFrames + 1
-	if perfElapsed >= 2.0 then
-		local avgFps = perfFrames / perfElapsed
-		if useGpuRenderer and renderer.isReady() and avgFps < 100 and not perfLoggedLowFps then
-			logger.log(string.format("FPS below 100 target in GPU mode (avg %.1f)", avgFps))
-			perfLoggedLowFps = true
-		elseif useGpuRenderer and renderer.isReady() and avgFps >= 100 then
-			perfLoggedLowFps = false
-		end
-		perfElapsed = 0
-		perfFrames = 0
+local function serviceNetworkEvents()
+	if not relay then
+		return
 	end
 
-	if not relay then return end
 	event = relay:service()
-
 	while event do
 		if event.type == "receive" then
 			networking.handlePacket(event.data, peers, objects, q)
 		elseif event.type == "disconnect" and relayServer and event.peer == relayServer then
 			relayServer = nil
+			logger.log("Relay disconnected.")
 		end
 
 		event = relay:service()
 	end
 end
 
+-- === Camera Movement ===
+function love.update(dt)
+	if not pauseMenu.active then
+		camera = engine.processMovement(camera, dt, flightSimMode, vector3, q, objects)
+		updateNet()
+
+		perfElapsed = perfElapsed + dt
+		perfFrames = perfFrames + 1
+		if perfElapsed >= 2.0 then
+			local avgFps = perfFrames / perfElapsed
+			if useGpuRenderer and renderer.isReady() and avgFps < 100 and not perfLoggedLowFps then
+				logger.log(string.format("FPS below 100 target in GPU mode (avg %.1f)", avgFps))
+				perfLoggedLowFps = true
+			elseif useGpuRenderer and renderer.isReady() and avgFps >= 100 then
+				perfLoggedLowFps = false
+			end
+			perfElapsed = 0
+			perfFrames = 0
+		end
+	end
+
+	serviceNetworkEvents()
+end
+
 -- === Input Management ===
 function love.keypressed(key)
 	if key == "escape" then
-		love.mouse.setRelativeMode(false)
-		relative = false
+		setPauseState(not pauseMenu.active)
+		return
+	end
+
+	if pauseMenu.active then
+		if key == "up" or key == "w" then
+			movePauseSelection(-1)
+		elseif key == "down" or key == "s" then
+			movePauseSelection(1)
+		elseif key == "left" or key == "a" then
+			adjustSelectedPauseItem(-1)
+		elseif key == "right" or key == "d" then
+			adjustSelectedPauseItem(1)
+		elseif key == "return" or key == "kpenter" or key == "space" then
+			activateSelectedPauseItem()
+		end
+		return
 	end
 
 	-- debugging position/rotation and relating variables
@@ -250,37 +622,37 @@ function love.keypressed(key)
 	end
 
 	if key == "f" then
-		flightSimMode = not flightSimMode
-		if not flightSimMode then
-			camera.throttle = 0
-		end
+		setFlightMode(not flightSimMode)
 	end
 
 	if key == "g" then
-		useGpuRenderer = not useGpuRenderer
-		local mode = (useGpuRenderer and renderer.isReady()) and "GPU" or "CPU"
-		renderMode = mode
-		logger.log("Render mode toggled to " .. mode)
+		setRendererPreference(not useGpuRenderer)
 	end
 end
 
 function love.mousepressed(x, y, button)
+	if pauseMenu.active then
+		if button == 1 then
+			handlePauseMenuMouseClick(x, y)
+		end
+		return
+	end
+
 	if not love.mouse.getRelativeMode() then
-		love.mouse.setRelativeMode(true)
-		relative = true
+		setMouseCapture(true)
 	end
 end
 
 function love.mousefocus(focused)
 	if not focused then
-		love.mouse.setRelativeMode(false)
-		relative = false
+		setMouseCapture(false)
 	end
 end
 
 local function drawHud(w, h, cx, cy)
 	-- to do: add bars on the bottom or left of the screen, white background rectangles, thinner coloured rectangle to indicate pos along the different axis with wrap around
 end
+
 function love.draw()
 	triangleCount = 0
 	local centerX, centerY = screen.w / 2, screen.h / 2
@@ -325,25 +697,32 @@ function love.draw()
 		love.graphics.draw(frameImage)
 	end
 
-
 	love.graphics.setColor(1, 1, 1)
 	love.graphics.print(
-		"WASD + Space (ground), F = flight mode, Q/E roll (flight), G = GPU toggle, Mouse look, Esc release mouse\n" ..
+		"WASD + Space (ground), F = flight mode, Q/E roll (flight), G = GPU toggle, Esc = pause menu\n" ..
 		"Render: " .. tostring(renderMode) .. " | Triangles: " .. tostring(math.floor(triangleCount)) .. " | FPS: " ..
 		love.timer.getFPS(),
 		10,
 		10
 	)
-	love.graphics.setColor(1, 0, 0, 0.5)
-	love.graphics.circle("fill", centerX, centerY, 1)
+
+	if not pauseMenu.active then
+		love.graphics.setColor(1, 0, 0, 0.5)
+		love.graphics.circle("fill", centerX, centerY, 1)
+	end
 
 	drawHud(screen.w, screen.h, centerX, centerY)
+
+	if pauseMenu.active then
+		drawPauseMenu()
+	end
 end
 
 function love.resize(w, h)
 	screen.w = w
 	screen.h = h
 	renderer.resize(screen)
+	refreshUiFonts()
 
 	zBuffer = {}
 	for i = 1, screen.w * screen.h do
