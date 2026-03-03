@@ -26,6 +26,7 @@ local mouseSensitivity = 0.001
 local invertLookY = false
 local showCrosshair = true
 local showDebugOverlay = true
+local colorCorruptionMode = false
 local pauseTitleFont, pauseItemFont
 local walkingPitchLimit = math.rad(89)
 local viewState = {
@@ -36,7 +37,7 @@ local altLookState = {
 	held = false,
 	yaw = 0,
 	pitch = 0,
-	yawLimit = math.rad(85),
+	yawLimit = math.rad(110),
 	pitchUpLimit = math.rad(55),
 	pitchDownLimit = math.rad(40),
 	camera = nil
@@ -61,11 +62,13 @@ local mapState = {
 local localPlayerObject = nil
 local worldHalfExtent = 1000
 local defaultGroundParams = {
-	seed = 12345,
+	seed = math.random(0, 999999),
 	tileSize = 2,
 	gridCount = 128,
 	baseHeight = 0,
 	tileThickness = 0.005,
+	curvature = 0.00000003,
+	recenterStep = 48,
 	roadCount = 6,
 	roadDensity = 0.10,
 	fieldCount = 10,
@@ -89,12 +92,12 @@ local windState = {
 local cloudState = {
 	groups = {},
 	groupCount = 85,
-	minAltitude = 80,
-	maxAltitude = 180,
+	minAltitude = 120,
+	maxAltitude = 375,
 	spawnRadius = 1400,
 	despawnRadius = 1900,
-	minGroupSize = 14,
-	maxGroupSize = 34,
+	minGroupSize = 18,
+	maxGroupSize = 52,
 	minPuffs = 5,
 	maxPuffs = 10
 }
@@ -1078,6 +1081,8 @@ end
 local function setFlightMode(enabled)
 	flightSimMode = enabled and true or false
 	if camera then
+		camera.yoke = camera.yoke or { pitch = 0, yaw = 0, roll = 0 }
+		camera.flightRotVel = camera.flightRotVel or { pitch = 0, yaw = 0, roll = 0 }
 		if flightSimMode then
 			camera.walkYaw = nil
 			camera.walkPitch = nil
@@ -1086,6 +1091,12 @@ local function setFlightMode(enabled)
 			camera.throttle = 0
 			camera.flightVel = { 0, 0, 0 }
 			camera.vel = { 0, 0, 0 }
+			camera.yoke.pitch = 0
+			camera.yoke.yaw = 0
+			camera.yoke.roll = 0
+			camera.flightRotVel.pitch = 0
+			camera.flightRotVel.yaw = 0
+			camera.flightRotVel.roll = 0
 			syncWalkingLookFromRotation()
 		end
 	end
@@ -1129,6 +1140,8 @@ local function resetCameraTransform()
 	camera.rot = q.identity()
 	camera.vel = { 0, 0, 0 }
 	camera.flightVel = { 0, 0, 0 }
+	camera.flightRotVel = { pitch = 0, yaw = 0, roll = 0 }
+	camera.yoke = { pitch = 0, yaw = 0, roll = 0 }
 	camera.throttle = 0
 	camera.onGround = false
 	camera.walkYaw = 0
@@ -1341,6 +1354,8 @@ function buildGroundSnapshotPacket(now)
 		tostring(params.gridCount),
 		formatNetFloat(params.baseHeight),
 		formatNetFloat(params.tileThickness),
+		formatNetFloat(params.curvature),
+		formatNetFloat(params.recenterStep),
 		tostring(params.roadCount),
 		formatNetFloat(params.roadDensity),
 		tostring(params.fieldCount),
@@ -1375,7 +1390,7 @@ function sendGroundSnapshot(reason)
 end
 
 function applyGroundSnapshotParts(parts, senderId)
-	if #parts < 19 then
+	if #parts < 21 then
 		return false
 	end
 
@@ -1385,17 +1400,19 @@ function applyGroundSnapshotParts(parts, senderId)
 		gridCount = tonumber(parts[5]),
 		baseHeight = tonumber(parts[6]),
 		tileThickness = tonumber(parts[7]),
-		roadCount = tonumber(parts[8]),
-		roadDensity = tonumber(parts[9]),
-		fieldCount = tonumber(parts[10]),
-		fieldMinSize = tonumber(parts[11]),
-		fieldMaxSize = tonumber(parts[12]),
-		grassColor = decodeColor3Token(parts[13], defaultGroundParams.grassColor),
-		roadColor = decodeColor3Token(parts[14], defaultGroundParams.roadColor),
-		fieldColor = decodeColor3Token(parts[15], defaultGroundParams.fieldColor),
-		grassVar = decodeColor3Token(parts[16], defaultGroundParams.grassVar),
-		roadVar = decodeColor3Token(parts[17], defaultGroundParams.roadVar),
-		fieldVar = decodeColor3Token(parts[18], defaultGroundParams.fieldVar)
+		curvature = tonumber(parts[8]) or defaultGroundParams.curvature,
+		recenterStep = tonumber(parts[9]) or defaultGroundParams.recenterStep,
+		roadCount = tonumber(parts[10]),
+		roadDensity = tonumber(parts[11]),
+		fieldCount = tonumber(parts[12]),
+		fieldMinSize = tonumber(parts[13]),
+		fieldMaxSize = tonumber(parts[14]),
+		grassColor = decodeColor3Token(parts[15], defaultGroundParams.grassColor),
+		roadColor = decodeColor3Token(parts[16], defaultGroundParams.roadColor),
+		fieldColor = decodeColor3Token(parts[17], defaultGroundParams.fieldColor),
+		grassVar = decodeColor3Token(parts[18], defaultGroundParams.grassVar),
+		roadVar = decodeColor3Token(parts[19], defaultGroundParams.roadVar),
+		fieldVar = decodeColor3Token(parts[20], defaultGroundParams.fieldVar)
 	})
 
 	rebuildGroundFromParams(params, "network peer " .. tostring(senderId))
@@ -3030,6 +3047,8 @@ normalizeGroundParams = function(params)
 		gridCount = math.max(1, math.floor(tonumber(src.gridCount) or defaultGroundParams.gridCount)),
 		baseHeight = tonumber(src.baseHeight) or defaultGroundParams.baseHeight,
 		tileThickness = math.max(0.0001, tonumber(src.tileThickness) or defaultGroundParams.tileThickness),
+		curvature = math.max(0, tonumber(src.curvature) or defaultGroundParams.curvature),
+		recenterStep = math.max(1, tonumber(src.recenterStep) or defaultGroundParams.recenterStep),
 		roadCount = math.max(0, math.floor(tonumber(src.roadCount) or defaultGroundParams.roadCount)),
 		roadDensity = clamp(tonumber(src.roadDensity) or defaultGroundParams.roadDensity, 0, 1),
 		fieldCount = math.max(0, math.floor(tonumber(src.fieldCount) or defaultGroundParams.fieldCount)),
@@ -3065,6 +3084,8 @@ groundParamsEqual = function(a, b)
 		a.gridCount == b.gridCount and
 		a.baseHeight == b.baseHeight and
 		a.tileThickness == b.tileThickness and
+		a.curvature == b.curvature and
+		a.recenterStep == b.recenterStep and
 		a.roadCount == b.roadCount and
 		a.roadDensity == b.roadDensity and
 		a.fieldCount == b.fieldCount and
@@ -3078,12 +3099,19 @@ groundParamsEqual = function(a, b)
 		colorsEqual(a.fieldVar, b.fieldVar)
 end
 
-function generateGroundMeshModel(params)
+function sampleGroundHeightAtWorld(worldX, worldZ, params)
+	local groundParams = params or activeGroundParams or defaultGroundParams
+	local curvature = tonumber(groundParams.curvature) or 0
+	local baseHeight = tonumber(groundParams.baseHeight) or 0
+	return baseHeight - ((worldX * worldX + worldZ * worldZ) * curvature)
+end
+
+function generateGroundMeshModel(params, centerX, centerZ)
 	local tileSize = params.tileSize
 	local gridCount = params.gridCount
 	local half = tileSize / 2
-
-	local grid, rng = generateCellGrid(params)
+	centerX = centerX or 0
+	centerZ = centerZ or 0
 
 	local grass = params.grassColor
 	local road = params.roadColor
@@ -3093,40 +3121,67 @@ function generateGroundMeshModel(params)
 	local roadVar = params.roadVar
 	local fieldVar = params.fieldVar
 
-	local function varied(base, var)
+	local function frac(v)
+		return v - math.floor(v)
+	end
+
+	local function hash01(ix, iz, salt)
+		local h = math.sin(ix * 127.1 + iz * 311.7 + params.seed * 13.17 + salt * 17.3) * 43758.5453123
+		return frac(h)
+	end
+
+	local function varied(base, var, ix, iz, salt)
 		return {
-			clamp(base[1] + (rng:rand01() * 2 - 1) * var[1], 0, 1),
-			clamp(base[2] + (rng:rand01() * 2 - 1) * var[2], 0, 1),
-			clamp(base[3] + (rng:rand01() * 2 - 1) * var[3], 0, 1)
+			clamp(base[1] + (hash01(ix, iz, salt) * 2 - 1) * var[1], 0, 1),
+			clamp(base[2] + (hash01(ix, iz, salt + 11) * 2 - 1) * var[2], 0, 1),
+			clamp(base[3] + (hash01(ix, iz, salt + 23) * 2 - 1) * var[3], 0, 1)
 		}
 	end
 
 	local vertices, faces = {}, {}
 	local vertexColors, faceColors = {}, {}
+	local roadWidth = 0.03 + clamp(params.roadDensity, 0, 1) * 0.28
+	local roadFreq = 0.06 + (params.roadCount * 0.012)
+	local fieldChance = clamp((params.fieldCount / 35), 0.08, 0.45)
 
 	for gx = 1, gridCount do
 		for gz = 1, gridCount do
-			local x = (gx - 1) - gridCount / 2
-			local z = (gz - 1) - gridCount / 2
-			local posX = x * tileSize + half
-			local posZ = z * tileSize + half
+			local localTileX = (gx - 1) - gridCount / 2
+			local localTileZ = (gz - 1) - gridCount / 2
+			local posX = localTileX * tileSize + half
+			local posZ = localTileZ * tileSize + half
+			local worldCenterX = centerX + posX
+			local worldCenterZ = centerZ + posZ
+			local tileIndexX = math.floor(worldCenterX / tileSize)
+			local tileIndexZ = math.floor(worldCenterZ / tileSize)
 
-			local cellType = grid[gx][gz]
+			local roadSignalX = math.abs(math.sin((tileIndexX + params.seed * 0.13) * roadFreq))
+			local roadSignalZ = math.abs(math.sin((tileIndexZ - params.seed * 0.21) * (roadFreq * 1.11)))
+			local regionNoise = hash01(math.floor(tileIndexX / 7), math.floor(tileIndexZ / 7), 41)
 			local c
-			if cellType == CELL_ROAD then
-				c = varied(road, roadVar)
-			elseif cellType == CELL_FIELD then
-				c = varied(field, fieldVar)
+			if roadSignalX < roadWidth or roadSignalZ < roadWidth then
+				c = varied(road, roadVar, tileIndexX, tileIndexZ, 3)
+			elseif regionNoise < fieldChance then
+				c = varied(field, fieldVar, tileIndexX, tileIndexZ, 7)
 			else
-				c = varied(grass, grassVar)
+				c = varied(grass, grassVar, tileIndexX, tileIndexZ, 13)
 			end
 			local rgba = { c[1], c[2], c[3], 1.0 }
 
+			local x0 = posX - half
+			local x1 = posX + half
+			local z0 = posZ - half
+			local z1 = posZ + half
+			local y00 = sampleGroundHeightAtWorld(centerX + x0, centerZ + z0, params)
+			local y10 = sampleGroundHeightAtWorld(centerX + x1, centerZ + z0, params)
+			local y11 = sampleGroundHeightAtWorld(centerX + x1, centerZ + z1, params)
+			local y01 = sampleGroundHeightAtWorld(centerX + x0, centerZ + z1, params)
+
 			local base = #vertices
-			vertices[base + 1] = { posX - half, 0, posZ - half }
-			vertices[base + 2] = { posX + half, 0, posZ - half }
-			vertices[base + 3] = { posX + half, 0, posZ + half }
-			vertices[base + 4] = { posX - half, 0, posZ + half }
+			vertices[base + 1] = { x0, y00, z0 }
+			vertices[base + 2] = { x1, y10, z0 }
+			vertices[base + 3] = { x1, y11, z1 }
+			vertices[base + 4] = { x0, y01, z1 }
 
 			vertexColors[base + 1] = rgba
 			vertexColors[base + 2] = rgba
@@ -3149,11 +3204,13 @@ function generateGroundMeshModel(params)
 	}
 end
 
-function createGroundObject(params)
+function createGroundObject(params, centerX, centerZ)
+	centerX = centerX or 0
+	centerZ = centerZ or 0
 	local halfExtent = (params.gridCount * params.tileSize) * 0.5
 	return {
-		model = generateGroundMeshModel(params),
-		pos = { 0, params.baseHeight, 0 },
+		model = generateGroundMeshModel(params, centerX, centerZ),
+		pos = { centerX, 0, centerZ },
 		rot = q.identity(),
 		scale = { 1, 1, 1 },
 		color = { 1, 1, 1, 1 },
@@ -3161,6 +3218,38 @@ function createGroundObject(params)
 		isGround = true,
 		halfSize = { x = halfExtent, y = params.tileThickness, z = halfExtent }
 	}
+end
+
+function updateGroundStreaming(forceRebuild)
+	if not groundObject or not activeGroundParams or not camera then
+		return false
+	end
+
+	local centerX = groundObject.pos[1] or 0
+	local centerZ = groundObject.pos[3] or 0
+	local halfExtent = (activeGroundParams.gridCount * activeGroundParams.tileSize) * 0.5
+	local threshold = halfExtent * 0.3
+	local needRecentering = forceRebuild or
+		(math.abs(camera.pos[1] - centerX) > threshold) or
+		(math.abs(camera.pos[3] - centerZ) > threshold)
+	if not needRecentering then
+		return false
+	end
+
+	local step = math.max(activeGroundParams.tileSize, activeGroundParams.recenterStep or 1)
+	local snappedX = math.floor((camera.pos[1] / step) + 0.5) * step
+	local snappedZ = math.floor((camera.pos[3] / step) + 0.5) * step
+	if (not forceRebuild) and math.abs(snappedX - centerX) < 1e-6 and math.abs(snappedZ - centerZ) < 1e-6 then
+		return false
+	end
+
+	groundObject.model = generateGroundMeshModel(activeGroundParams, snappedX, snappedZ)
+	groundObject.pos[1] = snappedX
+	groundObject.pos[2] = 0
+	groundObject.pos[3] = snappedZ
+	groundObject.halfSize.x = halfExtent
+	groundObject.halfSize.z = halfExtent
+	return true
 end
 
 rebuildGroundFromParams = function(params, reason)
@@ -3178,7 +3267,15 @@ rebuildGroundFromParams = function(params, reason)
 		end
 	end
 
-	groundObject = createGroundObject(normalized)
+	local step = math.max(normalized.tileSize, normalized.recenterStep or 1)
+	local centerX = 0
+	local centerZ = 0
+	if camera and camera.pos then
+		centerX = math.floor((camera.pos[1] / step) + 0.5) * step
+		centerZ = math.floor((camera.pos[3] / step) + 0.5) * step
+	end
+
+	groundObject = createGroundObject(normalized, centerX, centerZ)
 	local insertIndex = 1
 	if localPlayerObject and objects[1] == localPlayerObject then
 		insertIndex = 2
@@ -3247,20 +3344,30 @@ function love.load()
 		flightDragCoefficient = 0.018,
 		flightAirBrakeDrag = 0.11,
 		flightLiftCoefficient = 0.11,
-		flightZeroLiftAngle = 0,
+		flightZeroLiftAngle = math.rad(2),
 		flightMaxLiftAngle = math.rad(20),
+		flightCamberLiftCoefficient = 0.014,
 		flightStallSpeed = 8,
 		flightFullLiftSpeed = 24,
-		flightInducedDragCoefficient = 0.0035,
+		flightInducedDragCoefficient = 0.0075,
 		flightGravity = -9.81,
-		flightMaxVelocity = 92,
+		flightMaxVelocity = 64,
+		flightGroundFriction = 0.94,
 		flightVel = { 0, 0, 0 },
+		flightRotVel = { pitch = 0, yaw = 0, roll = 0 },
+		flightRotResponse = 6.0,
+		yoke = { pitch = 0, yaw = 0, roll = 0 },
+		yokeKeyboardRate = 2.8,
+		yokeAutoCenterRate = 1.9,
+		yokeMousePitchGain = 16,
+		yokeMouseYawGain = 14,
+		yokeMouseRollGain = 12,
 		afterburnerMultiplier = 1.45,
 		airBrakeStrength = 65,
 		flightThrottleDamping = 5,
 		wheelThrottleStep = 2,
 		flightPitchRate = 78,
-		flightYawRate = 10,
+		flightYawRate = 62,
 		flightRollRate = 95,
 		flightMousePitchMultiplier = 1.9,
 		flightMouseYawMultiplier = 3.5,
@@ -3452,10 +3559,15 @@ local function applyFlightMouseLook(dx, dy, modifiers)
 		pitchAxis = -pitchAxis
 	end
 
-	local pitchAngle = pitchAxis * mouseSensitivity * (camera.flightMousePitchMultiplier or 1.6)
-	local yawAngle = yawAxis * mouseSensitivity * (camera.flightMouseYawMultiplier or 3.0)
-	local rollAngle = rollAxis * mouseSensitivity * (camera.flightMouseRollMultiplier or 1.0)
-	applyCameraRotations(pitchAngle, yawAngle, rollAngle)
+	camera.yoke = camera.yoke or { pitch = 0, yaw = 0, roll = 0 }
+	local yoke = camera.yoke
+	local pitchGain = camera.yokeMousePitchGain or 16
+	local yawGain = camera.yokeMouseYawGain or 14
+	local rollGain = camera.yokeMouseRollGain or 12
+
+	yoke.pitch = clamp(yoke.pitch + pitchAxis * mouseSensitivity * pitchGain, -1, 1)
+	yoke.yaw = clamp(yoke.yaw + yawAxis * mouseSensitivity * yawGain, -1, 1)
+	yoke.roll = clamp(yoke.roll + rollAxis * mouseSensitivity * rollGain, -1, 1)
 end
 
 local function updateZoomFov(dt)
@@ -3606,9 +3718,14 @@ function love.update(dt)
 	end
 
 	if not pauseMenu.active then
+		updateGroundStreaming(false)
 		local movementInput = buildMovementInputState()
 		camera = engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, movementInput, {
-			wind = getWindVector3()
+			wind = getWindVector3(),
+			groundHeightAt = function(x, z)
+				return sampleGroundHeightAtWorld(x, z, activeGroundParams)
+			end,
+			groundClearance = (camera.box and camera.box.halfSize and camera.box.halfSize.y) or 1.0
 		})
 		syncLocalPlayerObject()
 		updateClouds(dt)
@@ -3753,6 +3870,13 @@ function love.keypressed(key, scancode, isrepeat)
 		end
 		return
 	end
+	if key == "0" then
+		if not isrepeat then
+			colorCorruptionMode = not colorCorruptionMode
+			logger.log("World color corruption mode: " .. (colorCorruptionMode and "ON" or "OFF"))
+		end
+		return
+	end
 
 	if flightSimMode and actionTriggeredByKey("flight_fire_projectile", key, getCurrentModifiers()) then
 		triggerProjectileAction()
@@ -3884,6 +4008,18 @@ local function drawHud(w, h, cx, cy)
 			currentMaxThrottle = currentMaxThrottle * (camera.afterburnerMultiplier or 1.6)
 		end
 
+		local wind = getWindVector3()
+		local v = camera.flightVel or camera.vel or { 0, 0, 0 }
+		local airVel = {
+			(v[1] or 0) - (wind[1] or 0),
+			(v[2] or 0) - (wind[2] or 0),
+			(v[3] or 0) - (wind[3] or 0)
+		}
+		local airSpeed = math.sqrt(airVel[1] * airVel[1] + airVel[2] * airVel[2] + airVel[3] * airVel[3])
+		local airSpeedRatio = clamp(airSpeed / currentMaxThrottle, 0, 1)
+		local airSpeedMph = airSpeed * 2.236936
+		local airSpeedKph = airSpeed * 3.6
+
 		local throttleRatio = clamp((camera.throttle or 0) / currentMaxThrottle, 0, 1)
 		local barHeight = math.floor(math.min(h * 0.34, 240))
 		local barWidth = 18
@@ -3909,6 +4045,75 @@ local function drawHud(w, h, cx, cy)
 
 		love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
 		love.graphics.print(string.format("THR %d%%", math.floor((throttleRatio * 100) + 0.5)), barX - 8, barY + barHeight + 6)
+
+		local iasX = barX + barWidth + 28
+		local iasHandleY = barY + (1 - airSpeedRatio) * barHeight - (handleSize * 0.5)
+		iasHandleY = clamp(iasHandleY, barY - (handleSize * 0.5), barY + barHeight - (handleSize * 0.5))
+
+		love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
+		love.graphics.rectangle("fill", iasX, barY, barWidth, barHeight, 3, 3)
+		love.graphics.setColor(0.75, 0.85, 0.92, 0.9)
+		love.graphics.rectangle("line", iasX, barY, barWidth, barHeight, 3, 3)
+
+		local iasFillTop = barY + (1 - airSpeedRatio) * barHeight
+		love.graphics.setColor(0.22, 0.72, 0.95, 0.65)
+		love.graphics.rectangle("fill", iasX + 1, iasFillTop, barWidth - 2, (barY + barHeight) - iasFillTop)
+
+		love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
+		love.graphics.rectangle("fill", iasX - 4, iasHandleY, handleSize, handleSize, 2, 2)
+		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
+		love.graphics.rectangle("line", iasX - 4, iasHandleY, handleSize, handleSize, 2, 2)
+
+		love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
+		love.graphics.print("IAS", iasX - 2, barY + barHeight + 6)
+		love.graphics.print(
+			string.format("%d mph / %d kph", math.floor(airSpeedMph + 0.5), math.floor(airSpeedKph + 0.5)),
+			iasX - 18,
+			barY + barHeight + 22
+		)
+
+		camera.yoke = camera.yoke or { pitch = 0, yaw = 0, roll = 0 }
+		local yoke = camera.yoke
+		local yokeSize = 96
+		local yokeX = iasX + barWidth + 26
+		local yokeY = math.floor((h - yokeSize) * 0.5)
+		local centerX = yokeX + yokeSize * 0.5
+		local centerY = yokeY + yokeSize * 0.5
+		local throw = yokeSize * 0.34
+		local yokeHandleSize = 16
+		local yokeHandleX = centerX + clamp(yoke.roll or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
+		local yokeHandleY = centerY + clamp(yoke.pitch or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
+
+		love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
+		love.graphics.rectangle("fill", yokeX, yokeY, yokeSize, yokeSize, 4, 4)
+		love.graphics.setColor(0.75, 0.85, 0.92, 0.9)
+		love.graphics.rectangle("line", yokeX, yokeY, yokeSize, yokeSize, 4, 4)
+		love.graphics.line(centerX, yokeY + 8, centerX, yokeY + yokeSize - 8)
+		love.graphics.line(yokeX + 8, centerY, yokeX + yokeSize - 8, centerY)
+
+		love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
+		love.graphics.rectangle("fill", yokeHandleX, yokeHandleY, yokeHandleSize, yokeHandleSize, 2, 2)
+		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
+		love.graphics.rectangle("line", yokeHandleX, yokeHandleY, yokeHandleSize, yokeHandleSize, 2, 2)
+
+		local rudderWidth = 10
+		local rudderX = yokeX + yokeSize + 10
+		local rudderY = yokeY
+		local rudderHandleSize = rudderWidth + 6
+		local rudderRatio = (clamp(yoke.yaw or 0, -1, 1) + 1) * 0.5
+		local rudderHandleY = rudderY + (1 - rudderRatio) * yokeSize - (rudderHandleSize * 0.5)
+		rudderHandleY = clamp(rudderHandleY, rudderY - (rudderHandleSize * 0.5), rudderY + yokeSize - (rudderHandleSize * 0.5))
+
+		love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
+		love.graphics.rectangle("fill", rudderX, rudderY, rudderWidth, yokeSize, 3, 3)
+		love.graphics.setColor(0.75, 0.85, 0.92, 0.9)
+		love.graphics.rectangle("line", rudderX, rudderY, rudderWidth, yokeSize, 3, 3)
+		love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
+		love.graphics.rectangle("fill", rudderX - 3, rudderHandleY, rudderHandleSize, rudderHandleSize, 2, 2)
+		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
+		love.graphics.rectangle("line", rudderX - 3, rudderHandleY, rudderHandleSize, rudderHandleSize, 2, 2)
+		love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
+		love.graphics.print("YOKE", yokeX + 22, yokeY + yokeSize + 8)
 	end
 
 	if not mapState.visible then
@@ -4015,9 +4220,17 @@ function love.draw()
 	local centerX, centerY = screen.w / 2, screen.h / 2
 	local renderCamera = viewState.activeCamera or resolveActiveRenderCamera() or camera
 	local renderObjects = buildRenderObjectList()
+	local worldTintR, worldTintG, worldTintB = 1, 1, 1
+	if colorCorruptionMode then
+		local t = love.timer.getTime()
+		worldTintR = 0.52 + 0.48 * math.sin(t * 2.13 + 0.4)
+		worldTintG = 0.52 + 0.48 * math.sin(t * 2.71 + 2.0)
+		worldTintB = 0.52 + 0.48 * math.sin(t * 3.19 + 4.1)
+	end
 
 	local usedGpu = false
 	if useGpuRenderer and renderer.isReady() then
+		love.graphics.setColor(worldTintR, worldTintG, worldTintB, 1)
 		local ok, renderOk, triOrErr = pcall(renderer.drawWorld, renderObjects, renderCamera, { 0.2, 0.2, 0.75, 1.0 })
 		if ok and renderOk then
 			usedGpu = true
@@ -4070,11 +4283,27 @@ function love.draw()
 		else
 			frameImage = love.graphics.newImage(imageData)
 		end
-		love.graphics.setColor(1, 1, 1, 1)
+		love.graphics.setColor(worldTintR, worldTintG, worldTintB, 1)
 		love.graphics.draw(frameImage)
 	end
 
 	if showDebugOverlay then
+		local velocity = (flightSimMode and camera.flightVel) or camera.vel or { 0, 0, 0 }
+		local speedUps = math.sqrt(
+			(velocity[1] or 0) * (velocity[1] or 0) +
+			(velocity[2] or 0) * (velocity[2] or 0) +
+			(velocity[3] or 0) * (velocity[3] or 0)
+		)
+		local rotVel = camera.flightRotVel or { pitch = 0, yaw = 0, roll = 0 }
+		local rotPitchDps = math.deg(rotVel.pitch or 0)
+		local rotYawDps = math.deg(rotVel.yaw or 0)
+		local rotRollDps = math.deg(rotVel.roll or 0)
+		local rotTotalDps = math.sqrt(
+			rotPitchDps * rotPitchDps +
+			rotYawDps * rotYawDps +
+			rotRollDps * rotRollDps
+		)
+
 		love.graphics.setColor(1, 1, 1)
 		love.graphics.print(
 			"Esc = pause menu (see Help/Controls tabs for full controls)\n" ..
@@ -4088,11 +4317,20 @@ function love.draw()
 				mapState.zoomIndex
 			) ..
 			string.format(
-				"Wind: %.1f u/s @ %d deg | Clouds: %d | CloudSync: %s",
+				"Wind: %.1f u/s @ %d deg | Clouds: %d | CloudSync: %s | CorruptMode:%s\n",
 				windState.speed,
 				math.floor(math.deg(windState.angle) + 0.5),
 				#cloudState.groups,
-				cloudNetState.role
+				cloudNetState.role,
+				colorCorruptionMode and "on" or "off"
+			) ..
+			string.format(
+				"Player: %.1f u/s | Rot: %.1f deg/s (P %.1f Y %.1f R %.1f)",
+				speedUps,
+				rotTotalDps,
+				rotPitchDps,
+				rotYawDps,
+				rotRollDps
 			),
 			10,
 			10

@@ -313,6 +313,16 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
         return value
     end
 
+    local function clamp(value, minValue, maxValue)
+        if value < minValue then
+            return minValue
+        end
+        if value > maxValue then
+            return maxValue
+        end
+        return value
+    end
+
     local speed = camera.speed * dt
     local forward, right, up = engine.getCameraBasis(camera, q, vector3)
 
@@ -337,23 +347,48 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
         local yawAxis = axis(inputState.flightYawRight, inputState.flightYawLeft)
         local rollAxis = axis(inputState.flightRollLeft, inputState.flightRollRight)
 
-        if pitchAxis ~= 0 then
-            local pitchRate = math.rad(camera.flightPitchRate or 60)
-            local pitchQuat = q.fromAxisAngle(right, pitchAxis * pitchRate * dt)
+        camera.yoke = camera.yoke or { pitch = 0, yaw = 0, roll = 0 }
+        local yoke = camera.yoke
+        local yokeKeyboardRate = camera.yokeKeyboardRate or 2.8
+        local yokeAutoCenterRate = camera.yokeAutoCenterRate or 1.9
+        local centerAlpha = clamp(yokeAutoCenterRate * dt, 0, 1)
+
+        yoke.pitch = clamp(yoke.pitch + pitchAxis * yokeKeyboardRate * dt, -1, 1)
+        yoke.yaw = clamp(yoke.yaw + yawAxis * yokeKeyboardRate * dt, -1, 1)
+        yoke.roll = clamp(yoke.roll + rollAxis * yokeKeyboardRate * dt, -1, 1)
+
+        yoke.pitch = yoke.pitch + (0 - yoke.pitch) * centerAlpha
+        yoke.yaw = yoke.yaw + (0 - yoke.yaw) * centerAlpha
+        yoke.roll = yoke.roll + (0 - yoke.roll) * centerAlpha
+
+        camera.flightRotVel = camera.flightRotVel or { pitch = 0, yaw = 0, roll = 0 }
+        local rotVel = camera.flightRotVel
+        local rotResponse = camera.flightRotResponse or 6.0
+        local responseAlpha = clamp(rotResponse * dt, 0, 1)
+
+        local targetPitchRate = yoke.pitch * math.rad(camera.flightPitchRate or 60)
+        local targetYawRate = yoke.yaw * math.rad(camera.flightYawRate or 70)
+        local targetRollRate = yoke.roll * math.rad(camera.flightRollRate or 90)
+
+        rotVel.pitch = rotVel.pitch + (targetPitchRate - rotVel.pitch) * responseAlpha
+        rotVel.yaw = rotVel.yaw + (targetYawRate - rotVel.yaw) * responseAlpha
+        rotVel.roll = rotVel.roll + (targetRollRate - rotVel.roll) * responseAlpha
+
+        if math.abs(rotVel.pitch) > 1e-6 then
+            local pitchQuat = q.fromAxisAngle(right, rotVel.pitch * dt)
             camera.rot = q.normalize(q.multiply(pitchQuat, camera.rot))
         end
-        if yawAxis ~= 0 then
-            local yawRate = math.rad(camera.flightYawRate or 70)
-            local yawQuat = q.fromAxisAngle(up, yawAxis * yawRate * dt)
+        if math.abs(rotVel.yaw) > 1e-6 then
+            local yawQuat = q.fromAxisAngle(up, rotVel.yaw * dt)
             camera.rot = q.normalize(q.multiply(yawQuat, camera.rot))
         end
-        if rollAxis ~= 0 then
-            local rollRate = math.rad(camera.flightRollRate or 90)
-            local rollQuat = q.fromAxisAngle(forward, rollAxis * rollRate * dt)
+        if math.abs(rotVel.roll) > 1e-6 then
+            local rollQuat = q.fromAxisAngle(forward, rotVel.roll * dt)
             camera.rot = q.normalize(q.multiply(rollQuat, camera.rot))
         end
 
         forward = vector3.normalizeVec(q.rotateVector(camera.rot, { 0, 0, 1 }))
+        right = vector3.normalizeVec(q.rotateVector(camera.rot, { 1, 0, 0 }))
         up = vector3.normalizeVec(q.rotateVector(camera.rot, { 0, 1, 0 }))
 
         local wind = (flightEnvironment and flightEnvironment.wind) or { 0, 0, 0 }
@@ -378,6 +413,7 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
         local airBrakeDrag = (inputState.flightAirBrakes and (camera.flightAirBrakeDrag or 0.11)) or 0
         local forwardAirspeed = math.max(0, vector3.dot(airVel, forward))
         local liftCoeff = camera.flightLiftCoefficient or 0.11
+        local camberLiftCoeff = camera.flightCamberLiftCoefficient or 0.014
         local stallSpeed = camera.flightStallSpeed or 8
         local fullLiftSpeed = camera.flightFullLiftSpeed or 24
         local liftWindow = math.max(1, fullLiftSpeed - stallSpeed)
@@ -387,18 +423,30 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
         local zeroLiftAngle = camera.flightZeroLiftAngle or 0
         local maxLiftAngle = camera.flightMaxLiftAngle or math.rad(20)
         local effectiveAoa = math.max(-maxLiftAngle, math.min(aoa - zeroLiftAngle, maxLiftAngle))
-        local liftMagnitude = liftCoeff * forwardAirspeed * forwardAirspeed * effectiveAoa * liftFactor
+        local dynamicPressure = forwardAirspeed * forwardAirspeed
+        local liftMagnitude = (liftCoeff * dynamicPressure * effectiveAoa + camberLiftCoeff * dynamicPressure) * liftFactor
         local inducedDragMagnitude = (camera.flightInducedDragCoefficient or 0.0035) * math.abs(liftMagnitude)
         local dragMagnitude = (dragCoeff + airBrakeDrag) * airSpeed * airSpeed
+
+        local liftDir = up
+        if airSpeed > 1e-5 then
+            local lx = airDir[2] * right[3] - airDir[3] * right[2]
+            local ly = airDir[3] * right[1] - airDir[1] * right[3]
+            local lz = airDir[1] * right[2] - airDir[2] * right[1]
+            local ll = math.sqrt(lx * lx + ly * ly + lz * lz)
+            if ll > 1e-5 then
+                liftDir = { lx / ll, ly / ll, lz / ll }
+            end
+        end
 
         local accel = {
             forward[1] * thrustAccel,
             forward[2] * thrustAccel,
             forward[3] * thrustAccel
         }
-        accel[1] = accel[1] + up[1] * liftMagnitude
-        accel[2] = accel[2] + up[2] * liftMagnitude + (camera.flightGravity or camera.gravity or -9.81)
-        accel[3] = accel[3] + up[3] * liftMagnitude
+        accel[1] = accel[1] + liftDir[1] * liftMagnitude
+        accel[2] = accel[2] + liftDir[2] * liftMagnitude + (camera.flightGravity or camera.gravity or -9.81)
+        accel[3] = accel[3] + liftDir[3] * liftMagnitude
         if airSpeed > 1e-5 then
             accel[1] = accel[1] - airDir[1] * (dragMagnitude + inducedDragMagnitude)
             accel[2] = accel[2] - airDir[2] * (dragMagnitude + inducedDragMagnitude)
@@ -421,8 +469,48 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
         for i = 1, 3 do
             camera.pos[i] = camera.pos[i] + camera.flightVel[i] * dt
         end
+
+        local groundHeight = nil
+        if flightEnvironment and type(flightEnvironment.groundHeightAt) == "function" then
+            groundHeight = flightEnvironment.groundHeightAt(camera.pos[1], camera.pos[3])
+        else
+            local highestY = -math.huge
+            for _, obj in ipairs(objects) do
+                if obj.isSolid and obj.halfSize then
+                    local dx = math.abs(camera.pos[1] - obj.pos[1])
+                    local dz = math.abs(camera.pos[3] - obj.pos[3])
+                    if dx <= obj.halfSize.x and dz <= obj.halfSize.z then
+                        local topY = obj.pos[2] + obj.halfSize.y
+                        if topY > highestY then
+                            highestY = topY
+                        end
+                    end
+                end
+            end
+            if highestY > -math.huge then
+                groundHeight = highestY
+            end
+        end
+
+        local flightGroundClearance = (flightEnvironment and flightEnvironment.groundClearance) or
+            ((camera.box and camera.box.halfSize and camera.box.halfSize.y) or 1.0)
+        if groundHeight and camera.pos[2] <= (groundHeight + flightGroundClearance) then
+            camera.pos[2] = groundHeight + flightGroundClearance
+            if camera.flightVel[2] < 0 then
+                camera.flightVel[2] = 0
+            end
+            local groundFriction = camera.flightGroundFriction or 0.94
+            camera.flightVel[1] = camera.flightVel[1] * groundFriction
+            camera.flightVel[3] = camera.flightVel[3] * groundFriction
+            camera.onGround = true
+        else
+            camera.onGround = false
+        end
+
+        if camera.box and camera.box.pos then
+            camera.box.pos = { camera.pos[1], camera.pos[2], camera.pos[3] }
+        end
         camera.vel = { camera.flightVel[1], camera.flightVel[2], camera.flightVel[3] }
-        camera.onGround = false
         return camera
     end
 
@@ -463,16 +551,21 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
     -- Update camera box
     camera.box.pos = { camera.pos[1], camera.pos[2], camera.pos[3] }
 
-    -- Collision with ground tiles: find highest tile under camera
+    -- Collision with ground tiles or procedural ground callback.
     local highestY = -math.huge
-    for _, obj in ipairs(objects) do
-        if obj.isSolid and obj.halfSize then
-            local dx = math.abs(camera.box.pos[1] - obj.pos[1])
-            local dz = math.abs(camera.box.pos[3] - obj.pos[3])
-            if dx <= obj.halfSize.x + camera.box.halfSize.x and dz <= obj.halfSize.z + camera.box.halfSize.z then
-                local topY = obj.pos[2] + obj.halfSize.y
-                if topY > highestY then
-                    highestY = topY
+    if flightEnvironment and type(flightEnvironment.groundHeightAt) == "function" then
+        highestY = flightEnvironment.groundHeightAt(camera.box.pos[1], camera.box.pos[3]) or highestY
+    end
+    if highestY == -math.huge then
+        for _, obj in ipairs(objects) do
+            if obj.isSolid and obj.halfSize then
+                local dx = math.abs(camera.box.pos[1] - obj.pos[1])
+                local dz = math.abs(camera.box.pos[3] - obj.pos[3])
+                if dx <= obj.halfSize.x + camera.box.halfSize.x and dz <= obj.halfSize.z + camera.box.halfSize.z then
+                    local topY = obj.pos[2] + obj.halfSize.y
+                    if topY > highestY then
+                        highestY = topY
+                    end
                 end
             end
         end
