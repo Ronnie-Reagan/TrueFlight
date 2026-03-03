@@ -35,6 +35,8 @@ playerWalkingModelHash = "builtin-cube"
 playerModelScale = playerWalkingModelScale
 playerModelHash = playerWalkingModelHash
 local screen, camera, groundObject, triangleCount, frameImage, renderMode, gpuErrorLogged --, zBuffer
+local frameImageW, frameImageH = 0, 0
+local worldRenderCanvas, worldRenderW, worldRenderH = nil, 0, 0
 local useGpuRenderer = true
 local perfElapsed, perfFrames, perfLoggedLowFps = 0, 0, false
 local zBuffer = {}
@@ -104,9 +106,50 @@ local hudCache = {
 	dialCanvas = nil,
 	dialSize = 0,
 	dialFontHeight = 0,
+	dialProfileKey = "",
 	controlCanvas = nil,
 	controlW = 0,
 	controlH = 0
+}
+
+local graphicsSettings = {
+	windowMode = "windowed",
+	resolutionOptions = {},
+	resolutionIndex = 1,
+	renderScale = 1.0,
+	drawDistance = 1800,
+	vsync = false
+}
+
+local hudSettings = {
+	showSpeedometer = true,
+	showThrottle = true,
+	showFlightControls = true,
+	showMap = true,
+	showGeoInfo = true,
+	showPeerIndicators = true,
+	speedometerMaxKph = 1000,
+	speedometerMinorStepKph = 20,
+	speedometerMajorStepKph = 100,
+	speedometerLabelStepKph = 200,
+	speedometerRedlineKph = 850
+}
+
+local characterPreview = {
+	plane = {
+		yaw = -35,
+		pitch = 14,
+		zoom = 1.0,
+		autoSpin = true,
+		spinRate = 28
+	},
+	walking = {
+		yaw = -35,
+		pitch = 12,
+		zoom = 1.0,
+		autoSpin = true,
+		spinRate = 28
+	}
 }
 
 localGroundClearance = 1.8
@@ -208,10 +251,16 @@ end
 
 local pauseMenu = {
 	active = false,
-	tab = "game",
+	tab = "main",
+	subTab = {
+		settings = "graphics",
+		characters = "plane",
+		hud = "speedometer"
+	},
 	selected = 1,
 	itemBounds = {},
 	tabBounds = {},
+	subTabBounds = {},
 	helpScroll = 0,
 	controlsScroll = 0,
 	controlsSelection = 1,
@@ -231,24 +280,65 @@ local pauseMenu = {
 	statusUntil = 0,
 	confirmItemId = nil,
 	confirmUntil = 0,
-	items = {
-		{ id = "resume", label = "Resume", kind = "action", help = "Close pause menu and continue playing." },
-		{ id = "flight", label = "Flight Mode", kind = "toggle", help = "Toggle no-gravity flight movement mode." },
-		{ id = "renderer", label = "Renderer", kind = "toggle", help = "Switch between GPU and CPU renderer paths." },
-		{ id = "crosshair", label = "Crosshair", kind = "toggle", help = "Show or hide center crosshair dot." },
-		{ id = "overlay", label = "Debug Overlay", kind = "toggle", help = "Toggle top-left help/perf text." },
-		{ id = "callsign", label = "Callsign", kind = "action", help = "Set your multiplayer callsign label shown over your player." },
-		{ id = "load_custom_stl", label = "Load Plane STL", kind = "action", help = "Open a path prompt and load any STL from disk (or drop a file on the window)." },
-		{ id = "model_scale", label = "Plane Scale", kind = "range", min = 0.5, max = 3.0, step = 0.05, help = "Scale normalized plane models for all clients." },
-		{ id = "load_walking_stl", label = "Load Walking STL", kind = "action", help = "Load a separate STL used only when not in flight mode." },
-		{ id = "walking_model_scale", label = "Walking Scale", kind = "range", min = 0.3, max = 3.0, step = 0.05, help = "Scale used for walking-mode player model." },
-		{ id = "speed", label = "Move Speed", kind = "range", min = 2, max = 30, step = 1, help = "Adjust player movement speed." },
-		{ id = "fov", label = "Field of View", kind = "range", min = 60, max = 120, step = 5, help = "Adjust camera FOV in degrees." },
-		{ id = "sensitivity", label = "Mouse Sensitivity", kind = "range", min = 0.0004, max = 0.004, step = 0.0002, help = "Adjust mouse look sensitivity." },
-		{ id = "invertY", label = "Invert Look Y", kind = "toggle", help = "Invert vertical mouse look direction." },
-		{ id = "reset", label = "Reset Camera", kind = "action", help = "Reset camera position and orientation." },
+	mainItems = {
+		{ id = "resume",    label = "Resume",          kind = "action", help = "Close pause menu and continue playing." },
+		{ id = "flight",    label = "Flight Mode",     kind = "toggle", help = "Toggle no-gravity flight movement mode." },
+		{ id = "callsign",  label = "Callsign",        kind = "action", help = "Set your multiplayer callsign label shown over your player." },
+		{ id = "reset",     label = "Reset Camera",    kind = "action", help = "Reset camera position and orientation." },
 		{ id = "reconnect", label = "Reconnect Relay", kind = "action", help = "Reconnect to multiplayer relay server." },
-		{ id = "quit", label = "Quit Game", kind = "action", confirm = true, help = "Exit the game client." }
+		{ id = "quit",      label = "Quit Game",       kind = "action", confirm = true,                                                      help = "Exit the game client." }
+	},
+	settingsItems = {
+		graphics = {
+			{ id = "window_mode",   label = "Window Mode",       kind = "cycle",  help = "Switch between windowed, borderless fullscreen, and exclusive fullscreen." },
+			{ id = "resolution",    label = "Resolution",        kind = "cycle",  help = "Target display resolution. In borderless mode this follows desktop resolution." },
+			{ id = "apply_video",   label = "Apply Display",     kind = "action", help = "Apply the selected window mode and resolution now." },
+			{ id = "render_scale",  label = "Render Scale",      kind = "range",  min = 0.5,                                                                              max = 1.5,   step = 0.05,   help = "Internal 3D render scale separate from display resolution." },
+			{ id = "draw_distance", label = "Draw Distance",     kind = "range",  min = 300,                                                                              max = 5000,  step = 100,    help = "How far objects remain rendered from the active camera." },
+			{ id = "vsync",         label = "VSync",             kind = "toggle", help = "Toggle vertical sync for display presentation." },
+			{ id = "renderer",      label = "Renderer",          kind = "toggle", help = "Switch between GPU and CPU renderer paths." },
+			{ id = "fov",           label = "Field of View",     kind = "range",  min = 60,                                                                               max = 120,   step = 5,      help = "Adjust camera FOV in degrees." },
+			{ id = "speed",         label = "Move Speed",        kind = "range",  min = 2,                                                                                max = 30,    step = 1,      help = "Adjust player movement speed." },
+			{ id = "sensitivity",   label = "Mouse Sensitivity", kind = "range",  min = 0.0004,                                                                           max = 0.004, step = 0.0002, help = "Adjust mouse look sensitivity." },
+			{ id = "invertY",       label = "Invert Look Y",     kind = "toggle", help = "Invert vertical mouse look direction." },
+			{ id = "crosshair",     label = "Crosshair",         kind = "toggle", help = "Show or hide center crosshair dot." },
+			{ id = "overlay",       label = "Debug Overlay",     kind = "toggle", help = "Toggle top-left help/perf text." }
+		}
+	},
+	characterItems = {
+		plane = {
+			{ id = "load_custom_stl",         label = "Load Plane STL", kind = "action", help = "Open a path prompt and load any STL from disk (or drop a file on the window)." },
+			{ id = "model_scale",             label = "Plane Scale",    kind = "range",  min = 0.5,                                                                             max = 3.0, step = 0.05, help = "Scale normalized plane models for all clients." },
+			{ id = "plane_preview_yaw",       label = "Preview Yaw",    kind = "range",  min = -180,                                                                            max = 180, step = 5,    help = "Rotate the plane preview model around the vertical axis." },
+			{ id = "plane_preview_pitch",     label = "Preview Pitch",  kind = "range",  min = -70,                                                                             max = 70,  step = 5,    help = "Rotate the plane preview model around the lateral axis." },
+			{ id = "plane_preview_zoom",      label = "Preview Zoom",   kind = "range",  min = 0.5,                                                                             max = 2.0, step = 0.05, help = "Scale only the preview display model." },
+			{ id = "plane_preview_auto_spin", label = "Auto Spin",      kind = "toggle", help = "When enabled, preview yaw rotates automatically." }
+		},
+		walking = {
+			{ id = "load_walking_stl",          label = "Load Walking STL", kind = "action", help = "Load a separate STL used only when not in flight mode." },
+			{ id = "walking_model_scale",       label = "Walking Scale",    kind = "range",  min = 0.3,                                                      max = 3.0, step = 0.05, help = "Scale used for walking-mode player model." },
+			{ id = "walking_preview_yaw",       label = "Preview Yaw",      kind = "range",  min = -180,                                                     max = 180, step = 5,    help = "Rotate the walking preview model around the vertical axis." },
+			{ id = "walking_preview_pitch",     label = "Preview Pitch",    kind = "range",  min = -70,                                                      max = 70,  step = 5,    help = "Rotate the walking preview model around the lateral axis." },
+			{ id = "walking_preview_zoom",      label = "Preview Zoom",     kind = "range",  min = 0.5,                                                      max = 2.0, step = 0.05, help = "Scale only the preview display model." },
+			{ id = "walking_preview_auto_spin", label = "Auto Spin",        kind = "toggle", help = "When enabled, preview yaw rotates automatically." }
+		}
+	},
+	hudItems = {
+		speedometer = {
+			{ id = "hud_speedometer_enabled",    label = "Speedometer",     kind = "toggle", help = "Show/hide the speedometer gauge in flight mode." },
+			{ id = "hud_speedometer_max_kph",    label = "Max KPH",         kind = "range",  min = 200,                                               max = 2200, step = 50, help = "Maximum speed represented by the speedometer arc." },
+			{ id = "hud_speedometer_minor_step", label = "Minor Tick Step", kind = "range",  min = 10,                                                max = 200,  step = 5,  help = "KPH step between minor ticks." },
+			{ id = "hud_speedometer_major_step", label = "Major Tick Step", kind = "range",  min = 50,                                                max = 500,  step = 10, help = "KPH step between major ticks." },
+			{ id = "hud_speedometer_label_step", label = "Label Step",      kind = "range",  min = 50,                                                max = 600,  step = 10, help = "KPH step used for numeric labels on major ticks." },
+			{ id = "hud_speedometer_redline",    label = "Redline KPH",     kind = "range",  min = 100,                                               max = 2200, step = 25, help = "KPH threshold where overspeed highlighting begins." }
+		},
+		modules = {
+			{ id = "hud_show_throttle",        label = "Throttle Panel",  kind = "toggle", help = "Show/hide the throttle HUD module in flight mode." },
+			{ id = "hud_show_controls",        label = "Control Surface", kind = "toggle", help = "Show/hide the flight control/yoke HUD module." },
+			{ id = "hud_show_map",             label = "Mini Map",        kind = "toggle", help = "Show/hide the top-right map module." },
+			{ id = "hud_show_geo",             label = "Geo Info",        kind = "toggle", help = "Show/hide the LAT/LON/ALT info module." },
+			{ id = "hud_show_peer_indicators", label = "Peer Indicators", kind = "toggle", help = "Show/hide world-space labels for network peers." }
+		}
 	}
 }
 
@@ -269,41 +359,42 @@ local function getPauseHelpSections()
 		{
 			title = "Flight Mode",
 			items = {
-				{ keys = "W / S", text = "Pitch nose down or up." },
-				{ keys = "A / D", text = "Bank left or right." },
+				{ keys = "W / S",           text = "Pitch nose down or up." },
+				{ keys = "A / D",           text = "Bank left or right." },
 				{ keys = "Mouse X / Q / E", text = "Yaw left or right for quick heading changes." },
-				{ keys = "Mouse Y", text = "Pitch nose up/down." },
-				{ keys = "Up / Down", text = "Throttle up or down." },
-				{ keys = "Space / Shift", text = "Air brakes and afterburner." }
+				{ keys = "Mouse Y",         text = "Pitch nose up/down." },
+				{ keys = "Up / Down",       text = "Throttle up or down." },
+				{ keys = "Space / Shift",   text = "Air brakes and afterburner." }
 			}
 		},
 		{
 			title = "Walking Mode",
 			items = {
-				{ keys = "W A S D", text = "Move and strafe in ground mode." },
+				{ keys = "W A S D",     text = "Move and strafe in ground mode." },
 				{ keys = "Mouse X / Y", text = "FPS look (yaw + clamped pitch)." },
-				{ keys = "Space", text = "Jump while grounded." },
-				{ keys = "Shift", text = "Sprint while held." }
+				{ keys = "Space",       text = "Jump while grounded." },
+				{ keys = "Shift",       text = "Sprint while held." }
 			}
 		},
 		{
 			title = "Cameras and Map",
 			items = {
-				{ keys = "C", text = "Cycle first-person and third-person camera modes." },
-				{ keys = "Hold Left Alt", text = "Temporary alt-look in first-person with head limits." },
-				{ keys = "Tap M", text = "Toggle the top-right mini map overlay." },
+				{ keys = "C",                text = "Cycle first-person and third-person camera modes." },
+				{ keys = "Hold Left Alt",    text = "Temporary alt-look in first-person with head limits." },
+				{ keys = "Tap M",            text = "Toggle the top-right mini map overlay." },
 				{ keys = "Hold M + Up/Down", text = "Change mini map zoom level without toggling map visibility." }
 			}
 		},
 		{
 			title = "Pause Menu",
 			items = {
-				{ keys = "Tab / H", text = "Cycle Game, Help, and Controls tabs." },
-				{ keys = "W/S or Up/Down", text = "Move selection in Game or Controls tab." },
-				{ keys = "A/D or Left/Right", text = "Adjust values or select binding slot." },
-				{ keys = "Enter", text = "Activate item or start binding capture in Controls." },
-				{ keys = "Mouse Wheel", text = "Adjust ranges (Game) or scroll (Help/Controls)." },
-				{ keys = "Esc", text = "Resume game, or cancel bind capture first." }
+				{ keys = "Tab / H",           text = "Cycle top tabs: Main, Settings, Characters, HUD, Controls, Help." },
+				{ keys = "[ / ]",             text = "Cycle sub-pages when available (Characters and HUD)." },
+				{ keys = "W/S or Up/Down",    text = "Move selection in list pages or Controls tab." },
+				{ keys = "A/D or Left/Right", text = "Adjust selected values or select controls binding slot." },
+				{ keys = "Enter",             text = "Activate item or start binding capture in Controls." },
+				{ keys = "Mouse Wheel",       text = "Adjust ranges (list pages) or scroll (Help/Controls)." },
+				{ keys = "Esc",               text = "Resume game, or cancel bind capture first." }
 			}
 		}
 	}
@@ -358,7 +449,8 @@ local function drawHudPlate(x, y, w, h, radius)
 	love.graphics.rectangle("fill", x, y, w, h, r, r)
 	love.graphics.setColor(hudTheme.plateHi[1], hudTheme.plateHi[2], hudTheme.plateHi[3], hudTheme.plateHi[4])
 	love.graphics.rectangle("fill", x + 1, y + 1, w - 2, math.max(4, h * 0.36), r, r)
-	love.graphics.setColor(hudTheme.plateBorder[1], hudTheme.plateBorder[2], hudTheme.plateBorder[3], hudTheme.plateBorder[4])
+	love.graphics.setColor(hudTheme.plateBorder[1], hudTheme.plateBorder[2], hudTheme.plateBorder[3],
+		hudTheme.plateBorder[4])
 	love.graphics.rectangle("line", x, y, w, h, r, r)
 end
 
@@ -380,6 +472,7 @@ local function resetHudCaches()
 	hudCache.dialCanvas = nil
 	hudCache.dialSize = 0
 	hudCache.dialFontHeight = 0
+	hudCache.dialProfileKey = ""
 	hudCache.controlCanvas = nil
 	hudCache.controlW = 0
 	hudCache.controlH = 0
@@ -427,7 +520,22 @@ local function ensureDialCanvas(size)
 	local dialSize = math.max(96, math.floor(size or 160))
 	local font = love.graphics.getFont()
 	local fontHeight = font and font:getHeight() or 0
-	if hudCache.dialCanvas and hudCache.dialSize == dialSize and hudCache.dialFontHeight == fontHeight then
+	local maxKph = math.max(200, tonumber(hudSettings.speedometerMaxKph) or 1000)
+	local minorStep = clamp(math.floor(tonumber(hudSettings.speedometerMinorStepKph) or 20), 5, maxKph)
+	local majorStep = clamp(math.floor(tonumber(hudSettings.speedometerMajorStepKph) or 100), minorStep, maxKph)
+	local labelStep = clamp(math.floor(tonumber(hudSettings.speedometerLabelStepKph) or 200), majorStep, maxKph)
+	local redline = clamp(math.floor(tonumber(hudSettings.speedometerRedlineKph) or 850), minorStep, maxKph)
+	local dialProfileKey = table.concat({
+		tostring(maxKph),
+		tostring(minorStep),
+		tostring(majorStep),
+		tostring(labelStep),
+		tostring(redline)
+	}, "|")
+	if hudCache.dialCanvas and
+		hudCache.dialSize == dialSize and
+		hudCache.dialFontHeight == fontHeight and
+		hudCache.dialProfileKey == dialProfileKey then
 		return hudCache.dialCanvas
 	end
 
@@ -438,6 +546,7 @@ local function ensureDialCanvas(size)
 		hudCache.dialCanvas = nil
 		hudCache.dialSize = 0
 		hudCache.dialFontHeight = 0
+		hudCache.dialProfileKey = ""
 		return nil
 	end
 
@@ -454,6 +563,7 @@ local function ensureDialCanvas(size)
 	local radius = dialSize * 0.5
 	local gaugeStart = math.rad(150)
 	local gaugeSweep = math.rad(240)
+	local maxMph = maxKph * 0.621371
 
 	love.graphics.setColor(0.02, 0.04, 0.06, 0.95)
 	love.graphics.circle("fill", cx, cy, radius * 0.95)
@@ -465,20 +575,29 @@ local function ensureDialCanvas(size)
 	love.graphics.circle("line", cx, cy, radius * 0.63)
 
 	love.graphics.setColor(1.0, 0.22, 0.22, 0.82)
-	local redStart = gaugeStart + (850 / 1000) * gaugeSweep
+	local redStart = gaugeStart + (redline / maxKph) * gaugeSweep
 	drawArcLine(cx, cy, radius * 0.88, redStart, gaugeStart + gaugeSweep, 14)
 
-	for kph = 0, 1000, 20 do
-		local ratio = kph / 1000
+	local function isMultiple(value, step)
+		if step <= 0 then
+			return false
+		end
+		local frac = value / step
+		return math.abs(frac - math.floor(frac + 0.5)) < 1e-4
+	end
+
+	for kph = 0, maxKph, minorStep do
+		local ratio = kph / maxKph
 		local angle = gaugeStart + ratio * gaugeSweep
-		local major = (kph % 100) == 0
+		local major = isMultiple(kph, majorStep)
 		local x0 = cx + math.cos(angle) * (radius * 0.88)
 		local y0 = cy + math.sin(angle) * (radius * 0.88)
 		local x1 = cx + math.cos(angle) * (major and (radius * 0.72) or (radius * 0.79))
 		local y1 = cy + math.sin(angle) * (major and (radius * 0.72) or (radius * 0.79))
-		love.graphics.setColor(major and 0.92 or 0.62, major and 0.96 or 0.74, major and 1.0 or 0.86, major and 0.98 or 0.68)
+		love.graphics.setColor(major and 0.92 or 0.62, major and 0.96 or 0.74, major and 1.0 or 0.86,
+			major and 0.98 or 0.68)
 		love.graphics.line(x0, y0, x1, y1)
-		if major and (kph % 200 == 0) then
+		if major and isMultiple(kph, labelStep) then
 			local tx = cx + math.cos(angle) * (radius * 0.58)
 			local ty = cy + math.sin(angle) * (radius * 0.58)
 			local label = tostring(kph)
@@ -486,17 +605,20 @@ local function ensureDialCanvas(size)
 		end
 	end
 
-	for mph = 0, 620, 50 do
-		local ratio = mph / 620
+	local mphMinorStep = math.max(10, math.floor((minorStep * 0.621371) + 0.5))
+	local mphMajorStep = math.max(mphMinorStep, math.floor((majorStep * 0.621371) + 0.5))
+	local mphLabelStep = math.max(mphMajorStep, math.floor((labelStep * 0.621371) + 0.5))
+	for mph = 0, math.floor(maxMph + 0.5), mphMinorStep do
+		local ratio = mph / math.max(1, maxMph)
 		local angle = gaugeStart + ratio * gaugeSweep
-		local major = (mph % 100) == 0
+		local major = isMultiple(mph, mphMajorStep)
 		local x0 = cx + math.cos(angle) * (radius * 0.62)
 		local y0 = cy + math.sin(angle) * (radius * 0.62)
 		local x1 = cx + math.cos(angle) * (major and (radius * 0.52) or (radius * 0.56))
 		local y1 = cy + math.sin(angle) * (major and (radius * 0.52) or (radius * 0.56))
 		love.graphics.setColor(0.62, 0.75, 0.9, major and 0.9 or 0.62)
 		love.graphics.line(x0, y0, x1, y1)
-		if major and (mph % 200 == 0) then
+		if major and isMultiple(mph, mphLabelStep) then
 			local tx = cx + math.cos(angle) * (radius * 0.44)
 			local ty = cy + math.sin(angle) * (radius * 0.44)
 			local label = tostring(mph)
@@ -515,6 +637,7 @@ local function ensureDialCanvas(size)
 	hudCache.dialCanvas = canvas
 	hudCache.dialSize = dialSize
 	hudCache.dialFontHeight = fontHeight
+	hudCache.dialProfileKey = dialProfileKey
 	return canvas
 end
 
@@ -553,6 +676,29 @@ local function ensureControlPanelCanvas(width, height)
 	hudCache.controlW = w
 	hudCache.controlH = h
 	return canvas
+end
+
+local function ensureWorldRenderCanvas(width, height)
+	local w = math.max(16, math.floor(width or screen.w))
+	local h = math.max(16, math.floor(height or screen.h))
+	if worldRenderCanvas and worldRenderW == w and worldRenderH == h then
+		return worldRenderCanvas
+	end
+
+	local ok, canvasOrErr = pcall(function()
+		return love.graphics.newCanvas(w, h)
+	end)
+	if not ok or not canvasOrErr then
+		worldRenderCanvas = nil
+		worldRenderW = 0
+		worldRenderH = 0
+		return nil
+	end
+
+	worldRenderCanvas = canvasOrErr
+	worldRenderW = w
+	worldRenderH = h
+	return worldRenderCanvas
 end
 
 local function worldToGeo(worldX, worldZ)
@@ -744,9 +890,26 @@ end
 
 local function buildRenderObjectList()
 	local renderObjects = {}
+	local activeCam = viewState.activeCamera or camera
+	local maxDist = math.max(300, tonumber(graphicsSettings.drawDistance) or 1800)
 	for _, obj in ipairs(objects) do
 		if shouldRenderObjectForView(obj) then
-			renderObjects[#renderObjects + 1] = obj
+			if activeCam and activeCam.pos and obj.pos then
+				local dx = obj.pos[1] - activeCam.pos[1]
+				local dy = obj.pos[2] - activeCam.pos[2]
+				local dz = obj.pos[3] - activeCam.pos[3]
+				local distSq = dx * dx + dy * dy + dz * dz
+				local radius = 0
+				if obj.halfSize then
+					radius = math.max(obj.halfSize.x or 0, obj.halfSize.y or 0, obj.halfSize.z or 0)
+				end
+				local limit = maxDist + radius
+				if distSq <= (limit * limit) then
+					renderObjects[#renderObjects + 1] = obj
+				end
+			else
+				renderObjects[#renderObjects + 1] = obj
+			end
 		end
 	end
 	return renderObjects
@@ -921,8 +1084,14 @@ end
 function hashModelBytes(raw)
 	if love.data and love.data.hash then
 		local ok, digest = pcall(function()
-			return love.data.hash("sha256", raw)
+			return love.data.hash("string", "sha256", raw)
 		end)
+		local loveMajor = (love.getVersion and select(1, love.getVersion())) or 0
+		if not ok and loveMajor < 12 then
+			ok, digest = pcall(function()
+				return love.data.hash("sha256", raw)
+			end)
+		end
 		if ok and type(digest) == "string" then
 			return bytesToHex(digest)
 		end
@@ -1122,7 +1291,8 @@ function setActivePlayerModel(entry, sourceLabel, targetRole)
 		#(entry.model.faces or {})
 	))
 	if entry.chunkCount and entry.chunkCount > 0 then
-		logger.log(string.format("Model %s is shareable (%d bytes, %d chunks).", entry.hash, entry.byteLength or 0, entry.chunkCount))
+		logger.log(string.format("Model %s is shareable (%d bytes, %d chunks).", entry.hash, entry.byteLength or 0,
+			entry.chunkCount))
 	else
 		logger.log("Model " .. tostring(entry.hash) .. " is local-only (transfer payload unavailable).")
 	end
@@ -1402,7 +1572,8 @@ function updatePeerVisualModel(peerId)
 	local role = (peer.remoteRole == "walking") and "walking" or "plane"
 	local planeHash = peer.planeModelHash or peer.modelHash or "builtin-cube"
 	local walkingHash = peer.walkingModelHash or peer.modelHash or planeHash or "builtin-cube"
-	local planeScale = math.max(0.05, tonumber(peer.planeModelScale) or ((peer.scale and peer.scale[1]) or defaultPlayerModelScale))
+	local planeScale = math.max(0.05,
+		tonumber(peer.planeModelScale) or ((peer.scale and peer.scale[1]) or defaultPlayerModelScale))
 	local walkingScale = math.max(0.05, tonumber(peer.walkingModelScale) or planeScale or defaultWalkingModelScale)
 	local wantedHash = (role == "walking") and walkingHash or planeHash
 	local peerScale = (role == "walking") and walkingScale or planeScale
@@ -2167,6 +2338,296 @@ local function trimWrappedLines(lines, maxLines)
 	return trimmed
 end
 
+local function getPauseTopTabs()
+	return {
+		{ id = "main",       label = "Main" },
+		{ id = "settings",   label = "Settings" },
+		{ id = "characters", label = "Characters" },
+		{ id = "hud",        label = "HUD" },
+		{ id = "controls",   label = "Controls" },
+		{ id = "help",       label = "Help" }
+	}
+end
+
+local function getPauseSubTabs(tabId)
+	if tabId == "settings" then
+		return {
+			{ id = "graphics", label = "Graphics" }
+		}
+	end
+	if tabId == "characters" then
+		return {
+			{ id = "plane",   label = "Plane" },
+			{ id = "walking", label = "Player" }
+		}
+	end
+	if tabId == "hud" then
+		return {
+			{ id = "speedometer", label = "Speedometer" },
+			{ id = "modules",     label = "Modules" }
+		}
+	end
+	return nil
+end
+
+local function getPauseActiveSubTab(tabId)
+	local tabs = getPauseSubTabs(tabId)
+	if not tabs or #tabs == 0 then
+		return nil
+	end
+
+	local current = pauseMenu.subTab[tabId]
+	for _, sub in ipairs(tabs) do
+		if sub.id == current then
+			return current
+		end
+	end
+
+	local fallback = tabs[1].id
+	pauseMenu.subTab[tabId] = fallback
+	return fallback
+end
+
+local function getPauseItemsForCurrentPage()
+	if pauseMenu.tab == "main" then
+		return pauseMenu.mainItems
+	end
+	if pauseMenu.tab == "settings" then
+		local sub = getPauseActiveSubTab("settings")
+		return pauseMenu.settingsItems[sub] or {}
+	end
+	if pauseMenu.tab == "characters" then
+		local sub = getPauseActiveSubTab("characters")
+		return pauseMenu.characterItems[sub] or {}
+	end
+	if pauseMenu.tab == "hud" then
+		local sub = getPauseActiveSubTab("hud")
+		return pauseMenu.hudItems[sub] or {}
+	end
+	return {}
+end
+
+local function clampPauseSelection()
+	local items = getPauseItemsForCurrentPage()
+	local count = #items
+	if count <= 0 then
+		pauseMenu.selected = 1
+		return
+	end
+	pauseMenu.selected = clamp(pauseMenu.selected, 1, count)
+end
+
+local function getGraphicsWindowModeLabel(modeId)
+	if modeId == "borderless" then
+		return "Borderless"
+	end
+	if modeId == "fullscreen" then
+		return "Fullscreen"
+	end
+	return "Windowed"
+end
+
+local function collectResolutionOptions()
+	local options = {}
+	local seen = {}
+
+	local function addOption(w, h)
+		w = math.floor(tonumber(w) or 0)
+		h = math.floor(tonumber(h) or 0)
+		if w < 640 or h < 360 then
+			return
+		end
+		local key = tostring(w) .. "x" .. tostring(h)
+		if seen[key] then
+			return
+		end
+		seen[key] = true
+		options[#options + 1] = {
+			w = w,
+			h = h,
+			label = string.format("%dx%d", w, h)
+		}
+	end
+
+	local desktopW, desktopH = love.window.getDesktopDimensions()
+	addOption(desktopW, desktopH)
+
+	local ok, modes = pcall(function()
+		return love.window.getFullscreenModes()
+	end)
+	if ok and type(modes) == "table" then
+		for _, mode in ipairs(modes) do
+			addOption(mode.width, mode.height)
+		end
+	end
+
+	addOption(1920, 1080)
+	addOption(1600, 900)
+	addOption(1366, 768)
+	addOption(1280, 720)
+	addOption(1024, 768)
+	addOption(800, 600)
+
+	table.sort(options, function(a, b)
+		local areaA = a.w * a.h
+		local areaB = b.w * b.h
+		if areaA == areaB then
+			return a.w > b.w
+		end
+		return areaA > areaB
+	end)
+
+	return options
+end
+
+local function findClosestResolutionIndex(options, targetW, targetH)
+	if type(options) ~= "table" or #options == 0 then
+		return 1
+	end
+
+	targetW = tonumber(targetW) or options[1].w
+	targetH = tonumber(targetH) or options[1].h
+	local bestIndex = 1
+	local bestScore = math.huge
+
+	for i, opt in ipairs(options) do
+		local dw = math.abs(opt.w - targetW)
+		local dh = math.abs(opt.h - targetH)
+		local score = (dw * dw) + (dh * dh)
+		if score < bestScore then
+			bestScore = score
+			bestIndex = i
+		end
+	end
+
+	return bestIndex
+end
+
+local function syncGraphicsSettingsFromWindow()
+	local w, h, flags = love.window.getMode()
+	flags = flags or {}
+
+	if flags.fullscreen then
+		if flags.fullscreentype == "exclusive" then
+			graphicsSettings.windowMode = "fullscreen"
+		else
+			graphicsSettings.windowMode = "borderless"
+		end
+	else
+		graphicsSettings.windowMode = "windowed"
+	end
+	graphicsSettings.vsync = (flags.vsync and flags.vsync ~= 0) and true or false
+	graphicsSettings.resolutionOptions = collectResolutionOptions()
+	graphicsSettings.resolutionIndex = findClosestResolutionIndex(graphicsSettings.resolutionOptions, w, h)
+	graphicsSettings.renderScale = clamp(graphicsSettings.renderScale or 1.0, 0.5, 1.5)
+	graphicsSettings.drawDistance = clamp(graphicsSettings.drawDistance or 1800, 300, 5000)
+end
+
+local function getSelectedResolutionOption()
+	local options = graphicsSettings.resolutionOptions
+	if type(options) ~= "table" or #options == 0 then
+		graphicsSettings.resolutionOptions = collectResolutionOptions()
+		options = graphicsSettings.resolutionOptions
+	end
+	graphicsSettings.resolutionIndex = clamp(
+		graphicsSettings.resolutionIndex or 1,
+		1,
+		math.max(1, #options)
+	)
+	return options[graphicsSettings.resolutionIndex]
+end
+
+local function rebuildCpuBuffersToWindow()
+	screen.w = love.graphics.getWidth()
+	screen.h = love.graphics.getHeight()
+	renderer.resize(screen)
+	refreshUiFonts()
+	resetHudCaches()
+	invalidateMapCache()
+
+	zBuffer = {}
+	for i = 1, screen.w * screen.h do
+		zBuffer[i] = math.huge
+	end
+	frameImage = nil
+	frameImageW = 0
+	frameImageH = 0
+	worldRenderCanvas = nil
+	worldRenderW = 0
+	worldRenderH = 0
+end
+
+local function applyGraphicsVideoMode()
+	local mode = graphicsSettings.windowMode
+	local selected = getSelectedResolutionOption()
+	local targetW = (selected and selected.w) or screen.w
+	local targetH = (selected and selected.h) or screen.h
+	local desktopW, desktopH = love.window.getDesktopDimensions()
+	local flags = {
+		vsync = graphicsSettings.vsync and 1 or 0,
+		depth = true,
+		resizable = true
+	}
+
+	if mode == "borderless" then
+		flags.fullscreen = true
+		flags.fullscreentype = "desktop"
+		flags.borderless = true
+		targetW, targetH = desktopW, desktopH
+	elseif mode == "fullscreen" then
+		flags.fullscreen = true
+		flags.fullscreentype = "exclusive"
+		flags.borderless = false
+	else
+		flags.fullscreen = false
+		flags.fullscreentype = "desktop"
+		flags.borderless = false
+	end
+
+	local ok, err = love.window.setMode(targetW, targetH, flags)
+	if not ok then
+		flags.depth = nil
+		ok, err = love.window.setMode(targetW, targetH, flags)
+	end
+	if not ok then
+		return false, err
+	end
+
+	syncGraphicsSettingsFromWindow()
+	rebuildCpuBuffersToWindow()
+	if renderer.setClipPlanes then
+		renderer.setClipPlanes(0.1, graphicsSettings.drawDistance)
+	end
+	return true
+end
+
+local function cyclePauseSubTab(direction)
+	local tabs = getPauseSubTabs(pauseMenu.tab)
+	if not tabs or #tabs == 0 or direction == 0 then
+		return
+	end
+	local current = getPauseActiveSubTab(pauseMenu.tab)
+	local index = 1
+	for i, sub in ipairs(tabs) do
+		if sub.id == current then
+			index = i
+			break
+		end
+	end
+	local step = direction > 0 and 1 or -1
+	local nextIndex = ((index - 1 + step) % #tabs) + 1
+	pauseMenu.subTab[pauseMenu.tab] = tabs[nextIndex].id
+	pauseMenu.selected = 1
+	pauseMenu.dragRange.active = false
+	pauseMenu.dragRange.itemIndex = nil
+	pauseMenu.dragRange.startX = 0
+	pauseMenu.dragRange.lastX = 0
+	pauseMenu.dragRange.totalDx = 0
+	pauseMenu.dragRange.moved = false
+	pauseMenu.confirmItemId = nil
+	pauseMenu.confirmUntil = 0
+end
+
 local function getSelectedControlAction()
 	local index = clamp(pauseMenu.controlsSelection, 1, #controlActions)
 	return controlActions[index], index
@@ -2318,12 +2779,16 @@ end
 local function buildPauseMenuLayout()
 	local titleFont = pauseTitleFont or love.graphics.getFont()
 	local itemFont = pauseItemFont or love.graphics.getFont()
-	local isGameTab = pauseMenu.tab == "game"
+	local currentItems = getPauseItemsForCurrentPage()
+	clampPauseSelection()
+	local isListTab = pauseMenu.tab ~= "help" and pauseMenu.tab ~= "controls"
 	local isHelpTab = pauseMenu.tab == "help"
 	local isControlsTab = pauseMenu.tab == "controls"
-	local itemCount = #pauseMenu.items
+	local itemCount = #currentItems
+	local subTabs = getPauseSubTabs(pauseMenu.tab)
+	local hasSubTabs = subTabs and #subTabs > 0
 
-	local panelW = math.min(660, screen.w * 0.9)
+	local panelW = math.min(880, screen.w * 0.9)
 	local panelX = (screen.w - panelW) / 2
 	local contentX = panelX + 18
 	local contentW = panelW - 36
@@ -2331,8 +2796,12 @@ local function buildPauseMenuLayout()
 	local controlsText
 	if modelLoadPrompt.active then
 		controlsText = "Model path entry active: type full path and press Enter, or Esc to cancel."
-	elseif isGameTab then
-		controlsText = "Tab/H for Help/Controls | Up/Down select | Enter apply | Esc resume"
+	elseif isListTab then
+		if hasSubTabs then
+			controlsText = "Tab/H top tabs | [ ] sub-pages | Up/Down select | Left/Right adjust | Esc resume"
+		else
+			controlsText = "Tab/H switch tabs | Up/Down select | Left/Right adjust | Enter apply | Esc resume"
+		end
 	elseif isControlsTab then
 		if pauseMenu.listeningBinding then
 			controlsText = "Listening: press a key/button, move mouse, or use wheel | Esc cancel"
@@ -2340,13 +2809,13 @@ local function buildPauseMenuLayout()
 			controlsText = "Enter listen | Left/Right slot | Backspace clear | R reset defaults | Esc resume"
 		end
 	else
-		controlsText = "Tab/H for Game/Controls | Mouse wheel scroll | Esc resume"
+		controlsText = "Tab/H switch tabs | Mouse wheel scroll | [ ] sub-pages | Esc resume"
 	end
 
-	local selectedItem = pauseMenu.items[pauseMenu.selected]
+	local selectedItem = currentItems[pauseMenu.selected]
 	local selectedControl = controlActions[pauseMenu.controlsSelection]
 	local detailText = ""
-	if isGameTab then
+	if isListTab then
 		detailText = selectedItem and selectedItem.help or ""
 	elseif isControlsTab then
 		detailText = selectedControl and selectedControl.description or ""
@@ -2357,50 +2826,37 @@ local function buildPauseMenuLayout()
 	local titleTopPad = 14
 	local titleH = titleFont:getHeight()
 	local tabH = lineH + 8
-	local topPad = titleTopPad + titleH + 8 + tabH + 10
+	local subTabH = hasSubTabs and (lineH + 6) or 0
+	local topPad = titleTopPad + titleH + 8 + tabH + (hasSubTabs and (subTabH + 8) or 0) + 10
 	local footerTopPad = 10
 	local footerGap = 6
 	local footerBottomPad = 10
-	local maxPanelH = math.max(220, screen.h - 24)
-	maxPanelH = math.min(maxPanelH, screen.h - 8)
-
-	local function computeFooterContentHeight(controlsLines, detailLines, statusLines)
-		local h = #controlsLines * lineH
-		if #detailLines > 0 then
-			h = h + footerGap + (#detailLines * lineH)
-		end
-		if #statusLines > 0 then
-			h = h + footerGap + (#statusLines * lineH)
-		end
-		return h
-	end
+	local panelY = math.floor(math.max(10, screen.h * 0.07))
+	local maxPanelH = math.max(220, screen.h - panelY - 8)
 
 	local controlsLines = trimWrappedLines(getWrappedLines(itemFont, controlsText, footerTextW), 2)
 	local detailLines = trimWrappedLines(getWrappedLines(itemFont, detailText, footerTextW), 2)
 	local statusLines = trimWrappedLines(getWrappedLines(itemFont, statusText, footerTextW), 2)
-	local footerContentH = computeFooterContentHeight(controlsLines, detailLines, statusLines)
-	local bottomPad = footerTopPad + footerContentH + footerBottomPad
-
-	if (maxPanelH - topPad - bottomPad) < itemCount * 18 then
-		controlsLines = trimWrappedLines(getWrappedLines(itemFont, controlsText, footerTextW), 1)
-		detailLines = trimWrappedLines(getWrappedLines(itemFont, detailText, footerTextW), 1)
-		statusLines = trimWrappedLines(getWrappedLines(itemFont, statusText, footerTextW), 1)
-		footerContentH = computeFooterContentHeight(controlsLines, detailLines, statusLines)
-		bottomPad = footerTopPad + footerContentH + footerBottomPad
-	end
+	local reservedFooterLines = 6
+	local reservedFooterContentH = (reservedFooterLines * lineH) + (footerGap * 2)
+	local bottomPad = footerTopPad + reservedFooterContentH + footerBottomPad
 
 	local availableContentH = math.max(1, maxPanelH - topPad - bottomPad)
 	local rowH = 0
 	local contentH = availableContentH
-	if isGameTab then
+	if isListTab then
 		local minRowH = math.max(lineH + 8, 24)
 		local maxRowH = 40
-		if availableContentH >= minRowH * itemCount then
+		if itemCount <= 0 then
+			rowH = minRowH
+			contentH = minRowH * 2
+		elseif availableContentH >= minRowH * itemCount then
 			rowH = clamp(math.floor(availableContentH / itemCount), minRowH, maxRowH)
+			contentH = math.max(1, rowH * itemCount)
 		else
 			rowH = math.max(lineH + 4, math.floor(availableContentH / itemCount))
+			contentH = math.max(1, rowH * itemCount)
 		end
-		contentH = math.max(1, rowH * itemCount)
 	else
 		contentH = math.max(lineH * 8, availableContentH)
 	end
@@ -2411,9 +2867,9 @@ local function buildPauseMenuLayout()
 	end
 
 	local finalContentH = math.max(1, panelH - topPad - bottomPad)
-	if isGameTab then
+	if isListTab and itemCount > 0 then
 		rowH = math.max(1, math.floor(finalContentH / itemCount))
-		finalContentH = rowH * itemCount
+		finalContentH = math.max(1, rowH * itemCount)
 		panelH = topPad + finalContentH + bottomPad
 		if panelH > maxPanelH then
 			panelH = maxPanelH
@@ -2424,15 +2880,28 @@ local function buildPauseMenuLayout()
 		end
 	end
 
-	local panelY = (screen.h - panelH) / 2
 	local titleY = panelY + titleTopPad
 	local tabY = titleY + titleH + 8
+	local subTabY = tabY + tabH + 8
 	local contentY = panelY + topPad
+	local rowX = contentX
+	local rowW = contentW
+	local previewX, previewY, previewW, previewH = nil, nil, nil, nil
+	if pauseMenu.tab == "characters" and isListTab then
+		rowW = math.max(220, math.floor(contentW * 0.56))
+		previewX = rowX + rowW + 8
+		previewY = contentY + 4
+		previewW = math.max(120, contentW - rowW - 8)
+		previewH = math.max(80, finalContentH - 8)
+	end
 
 	return {
-		isGameTab = isGameTab,
+		isListTab = isListTab,
 		isHelpTab = isHelpTab,
 		isControlsTab = isControlsTab,
+		hasSubTabs = hasSubTabs,
+		subTabY = subTabY,
+		subTabH = subTabH,
 		panelX = panelX,
 		panelY = panelY,
 		panelW = panelW,
@@ -2446,9 +2915,13 @@ local function buildPauseMenuLayout()
 		contentY = contentY,
 		contentW = contentW,
 		contentH = finalContentH,
-		rowX = contentX,
-		rowW = contentW,
+		rowX = rowX,
+		rowW = rowW,
 		rowH = rowH,
+		previewX = previewX,
+		previewY = previewY,
+		previewW = previewW,
+		previewH = previewH,
 		footerTopPad = footerTopPad,
 		footerGap = footerGap,
 		controlsLines = controlsLines,
@@ -2473,7 +2946,14 @@ local function clearPauseRangeDrag()
 end
 
 local function setPauseTab(tab)
-	if tab ~= "game" and tab ~= "help" and tab ~= "controls" then
+	local valid = false
+	for _, entry in ipairs(getPauseTopTabs()) do
+		if entry.id == tab then
+			valid = true
+			break
+		end
+	end
+	if not valid then
 		return
 	end
 	if pauseMenu.tab == tab then
@@ -2481,12 +2961,15 @@ local function setPauseTab(tab)
 	end
 
 	pauseMenu.tab = tab
+	getPauseActiveSubTab(tab)
 	pauseMenu.helpScroll = 0
 	pauseMenu.controlsScroll = 0
+	pauseMenu.selected = 1
 	pauseMenu.itemBounds = {}
 	pauseMenu.controlsRowBounds = {}
 	pauseMenu.controlsSlotBounds = {}
 	pauseMenu.tabBounds = {}
+	pauseMenu.subTabBounds = {}
 	clearPauseRangeDrag()
 	clearPauseConfirm()
 	if tab == "controls" then
@@ -2494,16 +2977,17 @@ local function setPauseTab(tab)
 	else
 		clearControlBindingCapture()
 	end
+	clampPauseSelection()
 end
 
 local function cyclePauseTab(direction)
 	if direction == 0 then
 		return
 	end
-	local tabs = { "game", "help", "controls" }
+	local tabs = getPauseTopTabs()
 	local currentIndex = 1
-	for i, tab in ipairs(tabs) do
-		if pauseMenu.tab == tab then
+	for i, entry in ipairs(tabs) do
+		if pauseMenu.tab == entry.id then
 			currentIndex = i
 			break
 		end
@@ -2511,7 +2995,7 @@ local function cyclePauseTab(direction)
 
 	local step = direction > 0 and 1 or -1
 	local nextIndex = ((currentIndex - 1 + step) % #tabs) + 1
-	setPauseTab(tabs[nextIndex])
+	setPauseTab(tabs[nextIndex].id)
 end
 
 local function isPauseConfirmActive(itemId)
@@ -2519,6 +3003,9 @@ local function isPauseConfirmActive(itemId)
 end
 
 local function getPauseItemValue(item)
+	if not item then
+		return ""
+	end
 	if item.id == "flight" then
 		return flightSimMode and "On" or "Off"
 	end
@@ -2533,6 +3020,29 @@ local function getPauseItemValue(item)
 	end
 	if item.id == "overlay" then
 		return showDebugOverlay and "On" or "Off"
+	end
+	if item.id == "window_mode" then
+		return getGraphicsWindowModeLabel(graphicsSettings.windowMode)
+	end
+	if item.id == "resolution" then
+		if graphicsSettings.windowMode == "borderless" then
+			local dw, dh = love.window.getDesktopDimensions()
+			return string.format("%dx%d (Desktop)", dw, dh)
+		end
+		local option = getSelectedResolutionOption()
+		return option and option.label or "Auto"
+	end
+	if item.id == "apply_video" then
+		return "Apply"
+	end
+	if item.id == "render_scale" then
+		return string.format("%.2fx", graphicsSettings.renderScale or 1.0)
+	end
+	if item.id == "draw_distance" then
+		return string.format("%dm", math.floor((graphicsSettings.drawDistance or 1800) + 0.5))
+	end
+	if item.id == "vsync" then
+		return graphicsSettings.vsync and "On" or "Off"
 	end
 	if item.id == "callsign" then
 		return (localCallsign and localCallsign ~= "") and localCallsign or "Unset"
@@ -2549,6 +3059,30 @@ local function getPauseItemValue(item)
 	if item.id == "walking_model_scale" then
 		return string.format("%.2fx", playerWalkingModelScale)
 	end
+	if item.id == "plane_preview_yaw" then
+		return string.format("%d deg", math.floor((characterPreview.plane.yaw or 0) + 0.5))
+	end
+	if item.id == "plane_preview_pitch" then
+		return string.format("%d deg", math.floor((characterPreview.plane.pitch or 0) + 0.5))
+	end
+	if item.id == "plane_preview_zoom" then
+		return string.format("%.2fx", characterPreview.plane.zoom or 1.0)
+	end
+	if item.id == "plane_preview_auto_spin" then
+		return characterPreview.plane.autoSpin and "On" or "Off"
+	end
+	if item.id == "walking_preview_yaw" then
+		return string.format("%d deg", math.floor((characterPreview.walking.yaw or 0) + 0.5))
+	end
+	if item.id == "walking_preview_pitch" then
+		return string.format("%d deg", math.floor((characterPreview.walking.pitch or 0) + 0.5))
+	end
+	if item.id == "walking_preview_zoom" then
+		return string.format("%.2fx", characterPreview.walking.zoom or 1.0)
+	end
+	if item.id == "walking_preview_auto_spin" then
+		return characterPreview.walking.autoSpin and "On" or "Off"
+	end
 	if item.id == "speed" and camera then
 		return string.format("%.1f", camera.speed)
 	end
@@ -2561,6 +3095,39 @@ local function getPauseItemValue(item)
 	end
 	if item.id == "invertY" then
 		return invertLookY and "On" or "Off"
+	end
+	if item.id == "hud_speedometer_enabled" then
+		return hudSettings.showSpeedometer and "On" or "Off"
+	end
+	if item.id == "hud_speedometer_max_kph" then
+		return string.format("%d kph", math.floor(hudSettings.speedometerMaxKph or 1000))
+	end
+	if item.id == "hud_speedometer_minor_step" then
+		return string.format("%d", math.floor(hudSettings.speedometerMinorStepKph or 20))
+	end
+	if item.id == "hud_speedometer_major_step" then
+		return string.format("%d", math.floor(hudSettings.speedometerMajorStepKph or 100))
+	end
+	if item.id == "hud_speedometer_label_step" then
+		return string.format("%d", math.floor(hudSettings.speedometerLabelStepKph or 200))
+	end
+	if item.id == "hud_speedometer_redline" then
+		return string.format("%d kph", math.floor(hudSettings.speedometerRedlineKph or 850))
+	end
+	if item.id == "hud_show_throttle" then
+		return hudSettings.showThrottle and "On" or "Off"
+	end
+	if item.id == "hud_show_controls" then
+		return hudSettings.showFlightControls and "On" or "Off"
+	end
+	if item.id == "hud_show_map" then
+		return hudSettings.showMap and "On" or "Off"
+	end
+	if item.id == "hud_show_geo" then
+		return hudSettings.showGeoInfo and "On" or "Off"
+	end
+	if item.id == "hud_show_peer_indicators" then
+		return hudSettings.showPeerIndicators and "On" or "Off"
 	end
 	if item.id == "reconnect" then
 		return getRelayStatus()
@@ -2577,6 +3144,56 @@ local function adjustPauseItem(item, direction, multiplier)
 	end
 
 	local scale = multiplier or 1
+	local stepDirection = direction > 0 and 1 or -1
+
+	if item.id == "window_mode" then
+		local modes = { "windowed", "borderless", "fullscreen" }
+		local index = 1
+		for i, modeId in ipairs(modes) do
+			if graphicsSettings.windowMode == modeId then
+				index = i
+				break
+			end
+		end
+		local nextIndex = ((index - 1 + stepDirection) % #modes) + 1
+		graphicsSettings.windowMode = modes[nextIndex]
+		setPauseStatus("Window Mode: " .. getPauseItemValue(item) .. " (select Apply Display).", 1.8)
+		return
+	end
+
+	if item.id == "resolution" then
+		local options = graphicsSettings.resolutionOptions
+		if type(options) ~= "table" or #options == 0 then
+			syncGraphicsSettingsFromWindow()
+			options = graphicsSettings.resolutionOptions
+		end
+		if #options > 0 then
+			graphicsSettings.resolutionIndex = ((graphicsSettings.resolutionIndex - 1 + stepDirection) % #options) + 1
+			setPauseStatus("Resolution: " .. getPauseItemValue(item) .. " (select Apply Display).", 1.8)
+		end
+		return
+	end
+
+	if item.id == "render_scale" then
+		local nextScale = clamp((graphicsSettings.renderScale or 1.0) + item.step * direction * scale, item.min, item
+		.max)
+		graphicsSettings.renderScale = math.floor(nextScale * 100 + 0.5) / 100
+		setPauseStatus("Render Scale: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "draw_distance" then
+		graphicsSettings.drawDistance = clamp(
+			(graphicsSettings.drawDistance or 1800) + item.step * direction * scale,
+			item.min,
+			item.max
+		)
+		if renderer.setClipPlanes then
+			renderer.setClipPlanes(0.1, graphicsSettings.drawDistance)
+		end
+		setPauseStatus("Draw Distance: " .. getPauseItemValue(item), 1.2)
+		return
+	end
 
 	if item.id == "speed" and camera then
 		camera.speed = clamp(camera.speed + item.step * direction * scale, item.min, item.max)
@@ -2604,6 +3221,48 @@ local function adjustPauseItem(item, direction, multiplier)
 		return
 	end
 
+	if item.id == "plane_preview_yaw" then
+		characterPreview.plane.yaw = clamp(characterPreview.plane.yaw + item.step * direction * scale, item.min, item
+		.max)
+		setPauseStatus("Plane Preview Yaw: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "plane_preview_pitch" then
+		characterPreview.plane.pitch = clamp(characterPreview.plane.pitch + item.step * direction * scale, item.min,
+			item.max)
+		setPauseStatus("Plane Preview Pitch: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "plane_preview_zoom" then
+		local value = clamp(characterPreview.plane.zoom + item.step * direction * scale, item.min, item.max)
+		characterPreview.plane.zoom = math.floor(value * 100 + 0.5) / 100
+		setPauseStatus("Plane Preview Zoom: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "walking_preview_yaw" then
+		characterPreview.walking.yaw = clamp(characterPreview.walking.yaw + item.step * direction * scale, item.min,
+			item.max)
+		setPauseStatus("Player Preview Yaw: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "walking_preview_pitch" then
+		characterPreview.walking.pitch = clamp(characterPreview.walking.pitch + item.step * direction * scale, item.min,
+			item.max)
+		setPauseStatus("Player Preview Pitch: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "walking_preview_zoom" then
+		local value = clamp(characterPreview.walking.zoom + item.step * direction * scale, item.min, item.max)
+		characterPreview.walking.zoom = math.floor(value * 100 + 0.5) / 100
+		setPauseStatus("Player Preview Zoom: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
 	if item.id == "fov" and camera then
 		local fovDeg = math.deg(camera.baseFov or camera.fov)
 		fovDeg = clamp(fovDeg + item.step * direction * scale, item.min, item.max)
@@ -2617,11 +3276,105 @@ local function adjustPauseItem(item, direction, multiplier)
 		local nextValue = clamp(mouseSensitivity + item.step * direction * scale, item.min, item.max)
 		mouseSensitivity = math.floor(nextValue * 10000 + 0.5) / 10000
 		setPauseStatus("Mouse Sensitivity: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "hud_speedometer_max_kph" then
+		hudSettings.speedometerMaxKph = clamp(
+			hudSettings.speedometerMaxKph + item.step * direction * scale,
+			item.min,
+			item.max
+		)
+		hudSettings.speedometerRedlineKph = clamp(
+			hudSettings.speedometerRedlineKph,
+			item.min,
+			hudSettings.speedometerMaxKph
+		)
+		hudSettings.speedometerMinorStepKph = clamp(
+			hudSettings.speedometerMinorStepKph,
+			5,
+			hudSettings.speedometerMaxKph
+		)
+		hudSettings.speedometerMajorStepKph = clamp(
+			hudSettings.speedometerMajorStepKph,
+			hudSettings.speedometerMinorStepKph,
+			hudSettings.speedometerMaxKph
+		)
+		hudSettings.speedometerLabelStepKph = clamp(
+			hudSettings.speedometerLabelStepKph,
+			hudSettings.speedometerMajorStepKph,
+			hudSettings.speedometerMaxKph
+		)
+		resetHudCaches()
+		setPauseStatus("Speedometer Max: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "hud_speedometer_minor_step" then
+		hudSettings.speedometerMinorStepKph = clamp(
+			hudSettings.speedometerMinorStepKph + item.step * direction * scale,
+			item.min,
+			item.max
+		)
+		hudSettings.speedometerMajorStepKph = math.max(hudSettings.speedometerMajorStepKph,
+			hudSettings.speedometerMinorStepKph)
+		hudSettings.speedometerLabelStepKph = math.max(hudSettings.speedometerLabelStepKph,
+			hudSettings.speedometerMajorStepKph)
+		resetHudCaches()
+		setPauseStatus("Minor Tick Step: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "hud_speedometer_major_step" then
+		hudSettings.speedometerMajorStepKph = clamp(
+			hudSettings.speedometerMajorStepKph + item.step * direction * scale,
+			item.min,
+			item.max
+		)
+		hudSettings.speedometerMajorStepKph = math.max(hudSettings.speedometerMajorStepKph,
+			hudSettings.speedometerMinorStepKph)
+		hudSettings.speedometerLabelStepKph = math.max(hudSettings.speedometerLabelStepKph,
+			hudSettings.speedometerMajorStepKph)
+		resetHudCaches()
+		setPauseStatus("Major Tick Step: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "hud_speedometer_label_step" then
+		hudSettings.speedometerLabelStepKph = clamp(
+			hudSettings.speedometerLabelStepKph + item.step * direction * scale,
+			item.min,
+			item.max
+		)
+		hudSettings.speedometerLabelStepKph = math.max(hudSettings.speedometerLabelStepKph,
+			hudSettings.speedometerMajorStepKph)
+		resetHudCaches()
+		setPauseStatus("Label Step: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "hud_speedometer_redline" then
+		hudSettings.speedometerRedlineKph = clamp(
+			hudSettings.speedometerRedlineKph + item.step * direction * scale,
+			item.min,
+			item.max
+		)
+		hudSettings.speedometerRedlineKph = clamp(
+			hudSettings.speedometerRedlineKph,
+			100,
+			hudSettings.speedometerMaxKph
+		)
+		resetHudCaches()
+		setPauseStatus("Redline: " .. getPauseItemValue(item), 1.2)
 	end
 end
 
 local function activatePauseItem(item)
 	if item.kind == "range" then
+		adjustPauseItem(item, 1)
+		return
+	end
+	if item.kind == "cycle" then
 		adjustPauseItem(item, 1)
 		return
 	end
@@ -2659,6 +3412,17 @@ local function activatePauseItem(item)
 		modelLoadPrompt.text = ""
 		modelLoadPrompt.cursor = 0
 		setPauseStatus("Walking STL path: Enter to load, Esc to cancel.", 4.5)
+	elseif item.id == "apply_video" then
+		local ok, err = applyGraphicsVideoMode()
+		if ok then
+			setPauseStatus("Display mode applied: " .. getGraphicsWindowModeLabel(graphicsSettings.windowMode) .. ".",
+				1.8)
+		else
+			setPauseStatus("Display apply failed: " .. tostring(err), 2.6)
+		end
+	elseif item.id == "vsync" then
+		graphicsSettings.vsync = not graphicsSettings.vsync
+		setPauseStatus("VSync: " .. getPauseItemValue(item) .. " (select Apply Display).", 1.6)
 	elseif item.id == "renderer" then
 		setRendererPreference(not useGpuRenderer)
 		setPauseStatus("Renderer: " .. getPauseItemValue(item), 1.2)
@@ -2671,6 +3435,30 @@ local function activatePauseItem(item)
 	elseif item.id == "invertY" then
 		invertLookY = not invertLookY
 		setPauseStatus("Invert Look Y: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "plane_preview_auto_spin" then
+		characterPreview.plane.autoSpin = not characterPreview.plane.autoSpin
+		setPauseStatus("Plane Auto Spin: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "walking_preview_auto_spin" then
+		characterPreview.walking.autoSpin = not characterPreview.walking.autoSpin
+		setPauseStatus("Player Auto Spin: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "hud_speedometer_enabled" then
+		hudSettings.showSpeedometer = not hudSettings.showSpeedometer
+		setPauseStatus("Speedometer: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "hud_show_throttle" then
+		hudSettings.showThrottle = not hudSettings.showThrottle
+		setPauseStatus("Throttle Panel: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "hud_show_controls" then
+		hudSettings.showFlightControls = not hudSettings.showFlightControls
+		setPauseStatus("Control Surface: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "hud_show_map" then
+		hudSettings.showMap = not hudSettings.showMap
+		setPauseStatus("Mini Map: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "hud_show_geo" then
+		hudSettings.showGeoInfo = not hudSettings.showGeoInfo
+		setPauseStatus("Geo Info: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "hud_show_peer_indicators" then
+		hudSettings.showPeerIndicators = not hudSettings.showPeerIndicators
+		setPauseStatus("Peer Indicators: " .. getPauseItemValue(item), 1.2)
 	elseif item.id == "reset" then
 		resetCameraTransform()
 		setPauseStatus("Camera reset.", 1.2)
@@ -2687,18 +3475,23 @@ local function activatePauseItem(item)
 end
 
 local function movePauseSelection(delta)
-	local itemCount = #pauseMenu.items
+	local itemCount = #getPauseItemsForCurrentPage()
+	if itemCount <= 0 then
+		pauseMenu.selected = 1
+		return
+	end
 	pauseMenu.selected = ((pauseMenu.selected - 1 + delta) % itemCount) + 1
 	clearPauseRangeDrag()
 	clearPauseConfirm()
 end
 
 local function adjustSelectedPauseItem(direction)
-	local item = pauseMenu.items[pauseMenu.selected]
+	local items = getPauseItemsForCurrentPage()
+	local item = items[pauseMenu.selected]
 	if not item then
 		return
 	end
-	if item.kind == "range" then
+	if item.kind == "range" or item.kind == "cycle" then
 		adjustPauseItem(item, direction)
 	elseif item.kind == "toggle" and direction ~= 0 then
 		activatePauseItem(item)
@@ -2706,21 +3499,23 @@ local function adjustSelectedPauseItem(direction)
 end
 
 local function adjustSelectedPauseItemCoarse(direction)
-	local item = pauseMenu.items[pauseMenu.selected]
+	local items = getPauseItemsForCurrentPage()
+	local item = items[pauseMenu.selected]
 	if item and item.kind == "range" then
 		adjustPauseItem(item, direction, 5)
 	end
 end
 
 local function activateSelectedPauseItem()
-	local item = pauseMenu.items[pauseMenu.selected]
+	local items = getPauseItemsForCurrentPage()
+	local item = items[pauseMenu.selected]
 	if item then
 		activatePauseItem(item)
 	end
 end
 
 local function updatePauseMenuHover(x, y)
-	if pauseMenu.tab ~= "game" then
+	if pauseMenu.tab == "help" or pauseMenu.tab == "controls" then
 		return
 	end
 	if pauseMenu.dragRange.active then
@@ -2747,8 +3542,8 @@ local function updatePauseControlsHover(x, y)
 	for i, slotBounds in ipairs(pauseMenu.controlsSlotBounds) do
 		for slot, bounds in ipairs(slotBounds) do
 			if bounds and
-					x >= bounds.x and x <= bounds.x + bounds.w and
-					y >= bounds.y and y <= bounds.y + bounds.h then
+				x >= bounds.x and x <= bounds.x + bounds.w and
+				y >= bounds.y and y <= bounds.y + bounds.h then
 				pauseMenu.controlsSelection = i
 				pauseMenu.controlsSlot = slot
 				return
@@ -2779,7 +3574,8 @@ local function updatePauseRangeDrag(x)
 	end
 
 	local itemIndex = pauseMenu.dragRange.itemIndex
-	local item = itemIndex and pauseMenu.items[itemIndex] or nil
+	local items = getPauseItemsForCurrentPage()
+	local item = itemIndex and items[itemIndex] or nil
 	if not item or item.kind ~= "range" then
 		clearPauseRangeDrag()
 		return
@@ -2805,7 +3601,8 @@ local function endPauseRangeDrag(x)
 
 	local itemIndex = pauseMenu.dragRange.itemIndex
 	local moved = pauseMenu.dragRange.moved
-	local item = itemIndex and pauseMenu.items[itemIndex] or nil
+	local items = getPauseItemsForCurrentPage()
+	local item = itemIndex and items[itemIndex] or nil
 	local bounds = itemIndex and pauseMenu.itemBounds[itemIndex] or nil
 
 	clearPauseRangeDrag()
@@ -2835,8 +3632,8 @@ local function handlePauseControlsMouseClick(x, y, button)
 	for i, slotBounds in ipairs(pauseMenu.controlsSlotBounds) do
 		for slot, bounds in ipairs(slotBounds) do
 			if bounds and
-					x >= bounds.x and x <= bounds.x + bounds.w and
-					y >= bounds.y and y <= bounds.y + bounds.h then
+				x >= bounds.x and x <= bounds.x + bounds.w and
+				y >= bounds.y and y <= bounds.y + bounds.h then
 				beginSelectedControlBindingCapture(i, slot)
 				return true
 			end
@@ -2861,19 +3658,32 @@ local function handlePauseMenuMouseClick(x, y)
 		end
 	end
 
+	for _, subTabBounds in ipairs(pauseMenu.subTabBounds) do
+		if x >= subTabBounds.x and x <= subTabBounds.x + subTabBounds.w and
+			y >= subTabBounds.y and y <= subTabBounds.y + subTabBounds.h then
+			pauseMenu.subTab[pauseMenu.tab] = subTabBounds.id
+			pauseMenu.selected = 1
+			clearPauseRangeDrag()
+			clearPauseConfirm()
+			return
+		end
+	end
+
 	if pauseMenu.tab == "controls" then
 		handlePauseControlsMouseClick(x, y, 1)
 		return
 	end
 
-	if pauseMenu.tab ~= "game" then
+	if pauseMenu.tab == "help" then
 		return
 	end
+
+	local items = getPauseItemsForCurrentPage()
 
 	for i, bounds in ipairs(pauseMenu.itemBounds) do
 		if x >= bounds.x and x <= bounds.x + bounds.w and y >= bounds.y and y <= bounds.y + bounds.h then
 			pauseMenu.selected = i
-			local item = pauseMenu.items[i]
+			local item = items[i]
 			clearPauseRangeDrag()
 			if item and item.id ~= "quit" then
 				clearPauseConfirm()
@@ -2901,16 +3711,21 @@ setPauseState = function(paused)
 		modelLoadPrompt.active = false
 		modelLoadPrompt.mode = "model_path"
 		modelLoadTargetRole = "plane"
-		pauseMenu.tab = "game"
+		pauseMenu.tab = "main"
 		pauseMenu.helpScroll = 0
 		pauseMenu.controlsScroll = 0
-		pauseMenu.selected = clamp(pauseMenu.selected, 1, #pauseMenu.items)
+		pauseMenu.selected = 1
+		getPauseActiveSubTab("settings")
+		getPauseActiveSubTab("characters")
+		getPauseActiveSubTab("hud")
+		clampPauseSelection()
 		pauseMenu.controlsSelection = clamp(pauseMenu.controlsSelection, 1, #controlActions)
 		pauseMenu.controlsSlot = clamp(pauseMenu.controlsSlot, 1, 2)
 		pauseMenu.itemBounds = {}
 		pauseMenu.controlsRowBounds = {}
 		pauseMenu.controlsSlotBounds = {}
 		pauseMenu.tabBounds = {}
+		pauseMenu.subTabBounds = {}
 		clearPauseRangeDrag()
 		clearControlBindingCapture()
 		setPauseStatus("", 0)
@@ -2922,6 +3737,7 @@ setPauseState = function(paused)
 		modelLoadPrompt.mode = "model_path"
 		modelLoadTargetRole = "plane"
 		pauseMenu.tabBounds = {}
+		pauseMenu.subTabBounds = {}
 		pauseMenu.itemBounds = {}
 		pauseMenu.controlsRowBounds = {}
 		pauseMenu.controlsSlotBounds = {}
@@ -2941,10 +3757,12 @@ local function drawPauseMenuRows(layout, rowTextHeight)
 	local arrowText = "<"
 	local rightArrowText = ">"
 	local arrowPad = 12
+	local items = getPauseItemsForCurrentPage()
+	clampPauseSelection()
 
 	pauseMenu.itemBounds = {}
-	for i, item in ipairs(pauseMenu.items) do
-		local rowY = layout.panelY + layout.topPad + (i - 1) * layout.rowH
+	for i, item in ipairs(items) do
+		local rowY = layout.contentY + (i - 1) * layout.rowH
 		local rowHeight = math.max(1, layout.rowH - 4)
 		local rowTextY = rowY + math.floor((rowHeight - rowTextHeight) / 2)
 		local selected = i == pauseMenu.selected
@@ -2967,7 +3785,7 @@ local function drawPauseMenuRows(layout, rowTextHeight)
 		love.graphics.setColor(1, 1, 1, 1)
 		love.graphics.print(centerText, centerTextX, rowTextY)
 
-		if item.kind == "range" then
+		if item.kind == "range" or item.kind == "cycle" then
 			local leftX = layout.rowX + arrowPad
 			local rightX = layout.rowX + layout.rowW - arrowPad - font:getWidth(rightArrowText)
 			love.graphics.print(arrowText, leftX, rowTextY)
@@ -2981,11 +3799,7 @@ end
 local function drawPauseMenuTabs(layout)
 	local font = love.graphics.getFont()
 	pauseMenu.tabBounds = {}
-	local labels = {
-		{ id = "game", label = "Game" },
-		{ id = "help", label = "Help" },
-		{ id = "controls", label = "Controls" }
-	}
+	local labels = getPauseTopTabs()
 	local tabGap = 8
 	local totalW = 0
 	for _, tab in ipairs(labels) do
@@ -3010,6 +3824,40 @@ local function drawPauseMenuTabs(layout)
 
 		pauseMenu.tabBounds[i] = { id = tab.id, x = x, y = layout.tabY, w = tabW, h = layout.tabH }
 		x = x + tabW + tabGap
+	end
+end
+
+local function drawPauseMenuSubTabs(layout)
+	local subTabs = getPauseSubTabs(pauseMenu.tab)
+	pauseMenu.subTabBounds = {}
+	if not subTabs or #subTabs == 0 then
+		return
+	end
+
+	local font = love.graphics.getFont()
+	local tabGap = 8
+	local totalW = 0
+	for _, sub in ipairs(subTabs) do
+		totalW = totalW + font:getWidth(sub.label) + 20
+	end
+	totalW = totalW + (tabGap * (#subTabs - 1))
+
+	local x = layout.panelX + (layout.panelW - totalW) / 2
+	local activeSub = getPauseActiveSubTab(pauseMenu.tab)
+	for i, sub in ipairs(subTabs) do
+		local subW = font:getWidth(sub.label) + 20
+		local active = activeSub == sub.id
+		if active then
+			love.graphics.setColor(0.22, 0.31, 0.48, 0.95)
+		else
+			love.graphics.setColor(0.13, 0.14, 0.17, 0.94)
+		end
+		love.graphics.rectangle("fill", x, layout.subTabY, subW, layout.subTabH, 5, 5)
+		love.graphics.setColor(1, 1, 1, active and 1 or 0.85)
+		love.graphics.printf(sub.label, x, layout.subTabY + math.floor((layout.subTabH - font:getHeight()) / 2), subW,
+			"center")
+		pauseMenu.subTabBounds[i] = { id = sub.id, x = x, y = layout.subTabY, w = subW, h = layout.subTabH }
+		x = x + subW + tabGap
 	end
 end
 
@@ -3168,8 +4016,8 @@ local function drawPauseControlsContent(layout)
 			local slotHeights = {}
 			for slot = 1, 2 do
 				local isListeningSlot = pauseMenu.listeningBinding and
-						pauseMenu.listeningBinding.actionIndex == i and
-						pauseMenu.listeningBinding.slot == slot
+					pauseMenu.listeningBinding.actionIndex == i and
+					pauseMenu.listeningBinding.slot == slot
 				local binding = action.bindings and action.bindings[slot] or nil
 				local text = controls.formatBinding(binding)
 				if isListeningSlot then
@@ -3271,8 +4119,8 @@ local function drawPauseControlsContent(layout)
 			local slotX = slot == 1 and row.slot1X or row.slot2X
 			local isActiveSlot = row.selected and pauseMenu.controlsSlot == slot
 			local isListeningSlot = pauseMenu.listeningBinding and
-					pauseMenu.listeningBinding.actionIndex == i and
-					pauseMenu.listeningBinding.slot == slot
+				pauseMenu.listeningBinding.actionIndex == i and
+				pauseMenu.listeningBinding.slot == slot
 			local text = table.concat(row.slotLines[slot], "\n")
 			local slotTextY = rowY + math.floor((row.h - row.slotHeights[slot]) / 2)
 
@@ -3315,6 +4163,105 @@ local function drawPauseControlsContent(layout)
 	end
 end
 
+local function drawPauseCharacterPreview(layout)
+	if pauseMenu.tab ~= "characters" or not layout.previewX then
+		return
+	end
+
+	local sub = getPauseActiveSubTab("characters")
+	local role = (sub == "walking") and "walking" or "plane"
+	local previewState = characterPreview[role]
+	local modelHash, modelScale = getConfiguredModelForRole(role)
+	local entry = playerModelCache[modelHash] or playerModelCache["builtin-cube"]
+	local model = (entry and entry.model) or cubeModel
+
+	local x = layout.previewX
+	local y = layout.previewY
+	local w = layout.previewW
+	local h = layout.previewH
+	local cx = x + w * 0.5
+	local cy = y + h * 0.54
+	local zoom = (previewState and previewState.zoom) or 1.0
+	local displayScale = math.min(w, h) * 0.28 * zoom * math.max(0.2, tonumber(modelScale) or 1.0)
+	local yawDeg = (previewState and previewState.yaw) or 0
+	local pitchDeg = (previewState and previewState.pitch) or 0
+	if previewState and previewState.autoSpin then
+		yawDeg = yawDeg + love.timer.getTime() * (previewState.spinRate or 22)
+	end
+	local yaw = math.rad(yawDeg)
+	local pitch = math.rad(pitchDeg)
+	local cosY, sinY = math.cos(yaw), math.sin(yaw)
+	local cosP, sinP = math.cos(pitch), math.sin(pitch)
+	local camZ = 5.4
+
+	love.graphics.setColor(0.1, 0.11, 0.14, 0.93)
+	love.graphics.rectangle("fill", x, y, w, h, 6, 6)
+	love.graphics.setColor(1, 1, 1, 0.18)
+	love.graphics.rectangle("line", x, y, w, h, 6, 6)
+
+	local projected = {}
+	for i, v in ipairs(model.vertices or {}) do
+		local vx = v[1] or 0
+		local vy = v[2] or 0
+		local vz = v[3] or 0
+		local rx = (vx * cosY) - (vz * sinY)
+		local rz = (vx * sinY) + (vz * cosY)
+		local ry = vy
+		local py = (ry * cosP) - (rz * sinP)
+		local pz = (ry * sinP) + (rz * cosP)
+		local denom = pz + camZ
+		if denom <= 0.05 then
+			projected[i] = nil
+		else
+			projected[i] = {
+				x = cx + (rx * displayScale) / denom,
+				y = cy - (py * displayScale) / denom
+			}
+		end
+	end
+
+	love.graphics.setScissor(x + 1, y + 1, w - 2, h - 2)
+	love.graphics.setColor(0.76, 0.9, 1.0, 0.88)
+	for _, face in ipairs(model.faces or {}) do
+		if #face >= 2 then
+			for i = 1, #face do
+				local ia = face[i]
+				local ib = face[(i % #face) + 1]
+				local a = projected[ia]
+				local b = projected[ib]
+				if a and b then
+					love.graphics.line(a.x, a.y, b.x, b.y)
+				end
+			end
+		end
+	end
+	love.graphics.setScissor()
+
+	love.graphics.setColor(0.82, 0.9, 1.0, 0.95)
+	love.graphics.printf(string.upper(role) .. " PREVIEW", x + 6, y + 6, w - 12, "center")
+	love.graphics.setColor(0.72, 0.84, 0.95, 0.9)
+	local modelHashString = tostring(modelHash)
+
+	if #modelHashString > 10 then
+		modelHashString = string.sub(modelHashString, 1, 10) .. "..."
+	end
+
+	love.graphics.printf(
+		string.format("Model: %s", modelHashString),
+		x + 8,
+		y + h - (layout.lineH * 2) - 8,
+		w - 16,
+		"center"
+	)
+	love.graphics.printf(
+		string.format("Scale %.2fx", tonumber(modelScale) or 1.0),
+		x + 8,
+		y + h - layout.lineH - 6,
+		w - 16,
+		"center"
+	)
+end
+
 local function drawPauseMenuFooter(layout)
 	local footerX = layout.panelX + 18
 	local footerW = layout.panelW - 36
@@ -3348,7 +4295,8 @@ function drawModelLoadPrompt(layout)
 	local promptH = math.max(54, layout.lineH * 2 + 16)
 	local promptY = layout.panelY + layout.panelH - promptH - 12
 	local isCallsignPrompt = modelLoadPrompt.mode == "callsign"
-	local targetLabel = isCallsignPrompt and "Callsign" or ((modelLoadTargetRole == "walking") and "Walking STL" or "Plane STL")
+	local targetLabel = isCallsignPrompt and "Callsign" or
+	((modelLoadTargetRole == "walking") and "Walking STL" or "Plane STL")
 	local prefix = targetLabel .. ": "
 	local left = modelLoadPrompt.text:sub(1, modelLoadPrompt.cursor)
 	local cursorX = promptX + 10 + love.graphics.getFont():getWidth(prefix .. left)
@@ -3387,8 +4335,10 @@ local function drawPauseMenu()
 
 	love.graphics.setFont(itemFont)
 	drawPauseMenuTabs(layout)
-	if layout.isGameTab then
+	drawPauseMenuSubTabs(layout)
+	if layout.isListTab then
 		drawPauseMenuRows(layout, itemFont:getHeight())
+		drawPauseCharacterPreview(layout)
 	elseif layout.isControlsTab then
 		pauseMenu.itemBounds = {}
 		drawPauseControlsContent(layout)
@@ -3453,7 +4403,7 @@ function love.load()
 	width, height = math.floor(width * 0.8), math.floor(height * 0.8)
 
 	love.window.setTitle("Don's 3D Engine")
-	local modeOk, modeErr = love.window.setMode(width, height, { vsync = false, depth = 24 })
+	local modeOk, modeErr = love.window.setMode(width, height, { vsync = false, depth = true })
 	if not modeOk then
 		love.window.setMode(width, height, { vsync = false })
 	end
@@ -3485,9 +4435,9 @@ function love.load()
 		zoomFactor = 0.58,
 		zoomLerpSpeed = 12,
 		vel = { 0, 0, 0 }, -- current velocity
-		onGround = false,  -- contacting
-		gravity = -9.81,   -- units/sec^2
-		jumpSpeed = 5,     -- initial jump
+		onGround = false, -- contacting
+		gravity = -9.81, -- units/sec^2
+		jumpSpeed = 5, -- initial jump
 		throttle = 0,
 		throttleAccel = 0.55,
 		flightMass = 1.0,
@@ -3532,7 +4482,7 @@ function love.load()
 		walkTiltRate = 40,
 		box = {
 			halfSize = { x = 0.5, y = 1.8, z = 0.5 }, -- width/height/depth half extents
-			pos = { 0, 0, -5 },                       -- center at camera
+			pos = { 0, 0, -5 },              -- center at camera
 			isSolid = true
 		}
 	}
@@ -3561,10 +4511,11 @@ function love.load()
 	gpuErrorLogged = false
 	perfElapsed, perfFrames, perfLoggedLowFps = 0, 0, false
 	pauseMenu.active = false
-	pauseMenu.tab = "game"
+	pauseMenu.tab = "main"
 	pauseMenu.selected = 1
 	pauseMenu.itemBounds = {}
 	pauseMenu.tabBounds = {}
+	pauseMenu.subTabBounds = {}
 	pauseMenu.helpScroll = 0
 	pauseMenu.controlsScroll = 0
 	pauseMenu.controlsSelection = 1
@@ -3581,6 +4532,10 @@ function love.load()
 	modelLoadPrompt.mode = "model_path"
 	modelLoadPrompt.text = ""
 	modelLoadPrompt.cursor = 0
+	syncGraphicsSettingsFromWindow()
+	if renderer.setClipPlanes then
+		renderer.setClipPlanes(0.1, graphicsSettings.drawDistance)
+	end
 
 	local loadedDefaultModel = loadPlayerModelFromStl(defaultPlayerModelPath, "plane")
 	if not loadedDefaultModel then
@@ -3637,6 +4592,9 @@ function love.load()
 		useGpuRenderer = false
 		renderMode = "CPU"
 		logger.log("GPU renderer failed, using CPU fallback: " .. tostring(gpuErr))
+	end
+	if renderer.setClipPlanes then
+		renderer.setClipPlanes(0.1, graphicsSettings.drawDistance)
 	end
 
 	resolveActiveRenderCamera()
@@ -3958,7 +4916,7 @@ function love.update(dt)
 		updateGroundStreaming(false)
 		local movementInput = buildMovementInputState()
 		camera = engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, movementInput, {
-				wind = cloudSim.getWindVector3(windState),
+			wind = cloudSim.getWindVector3(windState),
 			groundHeightAt = function(x, z)
 				return sampleGroundHeightAtWorld(x, z, activeGroundParams)
 			end,
@@ -4040,6 +4998,14 @@ function love.keypressed(key, scancode, isrepeat)
 			cyclePauseTab(1)
 			return
 		end
+		if key == "leftbracket" or key == "[" then
+			cyclePauseSubTab(-1)
+			return
+		end
+		if key == "rightbracket" or key == "]" then
+			cyclePauseSubTab(1)
+			return
+		end
 
 		if pauseMenu.tab == "help" then
 			if key == "up" or key == "w" then
@@ -4089,7 +5055,8 @@ function love.keypressed(key, scancode, isrepeat)
 			pauseMenu.selected = 1
 			clearPauseConfirm()
 		elseif key == "end" then
-			pauseMenu.selected = #pauseMenu.items
+			local items = getPauseItemsForCurrentPage()
+			pauseMenu.selected = math.max(1, #items)
 			clearPauseConfirm()
 		elseif key == "left" or key == "a" then
 			adjustSelectedPauseItem(-1)
@@ -4273,8 +5240,9 @@ function love.wheelmoved(x, y)
 			return
 		end
 
-		local item = pauseMenu.items[pauseMenu.selected]
-		if item and item.kind == "range" then
+		local items = getPauseItemsForCurrentPage()
+		local item = items[pauseMenu.selected]
+		if item and (item.kind == "range" or item.kind == "cycle") then
 			adjustPauseItem(item, y > 0 and 1 or -1)
 		end
 		return
@@ -4447,7 +5415,9 @@ local function drawHud(w, h, cx, cy, renderCamera)
 		local airSpeed = math.sqrt(airVel[1] * airVel[1] + airVel[2] * airVel[2] + airVel[3] * airVel[3])
 		local airSpeedMph = airSpeed * 2.236936
 		local airSpeedKph = airSpeed * 3.6
-		local clampedKph = clamp(airSpeedKph, 0, 1000)
+		local maxDialKph = math.max(200, tonumber(hudSettings.speedometerMaxKph) or 1000)
+		local redlineKph = clamp(tonumber(hudSettings.speedometerRedlineKph) or 850, 100, maxDialKph)
+		local clampedKph = clamp(airSpeedKph, 0, maxDialKph)
 		local throttleRatio = clamp(camera.throttle or 0, 0, 1)
 		local throttlePct = math.floor((throttleRatio * 100) + 0.5)
 		local thrustNow = throttleRatio * (camera.flightThrustForce or camera.flightThrustAccel or 0)
@@ -4461,139 +5431,148 @@ local function drawHud(w, h, cx, cy, renderCamera)
 		if dialY < (dialSize * 0.5 + 14) then
 			dialY = dialSize * 0.5 + 14
 		end
-		local dialCanvas = ensureDialCanvas(dialSize)
-		if dialCanvas then
-			love.graphics.setColor(1, 1, 1, 0.98)
-			love.graphics.draw(dialCanvas, dialX - dialSize * 0.5, dialY - dialSize * 0.5)
-		else
-			drawHudPlate(dialX - dialSize * 0.5, dialY - dialSize * 0.5, dialSize, dialSize, 9)
+		if hudSettings.showSpeedometer then
+			local dialCanvas = ensureDialCanvas(dialSize)
+			if dialCanvas then
+				love.graphics.setColor(1, 1, 1, 0.98)
+				love.graphics.draw(dialCanvas, dialX - dialSize * 0.5, dialY - dialSize * 0.5)
+			else
+				drawHudPlate(dialX - dialSize * 0.5, dialY - dialSize * 0.5, dialSize, dialSize, 9)
+			end
+
+			local gaugeStart = math.rad(150)
+			local gaugeSweep = math.rad(240)
+			local speedRatio = clampedKph / maxDialKph
+			local needleAngle = gaugeStart + speedRatio * gaugeSweep
+			local needleLen = dialSize * 0.4
+			local nx = dialX + math.cos(needleAngle) * needleLen
+			local ny = dialY + math.sin(needleAngle) * needleLen
+			love.graphics.setLineWidth(2.5)
+			if airSpeedKph > redlineKph then
+				love.graphics.setColor(hudTheme.overspeed[1], hudTheme.overspeed[2], hudTheme.overspeed[3],
+					hudTheme.overspeed[4])
+			else
+				love.graphics.setColor(hudTheme.needle[1], hudTheme.needle[2], hudTheme.needle[3], hudTheme.needle[4])
+			end
+			love.graphics.line(dialX, dialY, nx, ny)
+			love.graphics.setLineWidth(1)
+			love.graphics.setColor(0.88, 0.95, 1.0, 0.96)
+			love.graphics.circle("fill", dialX, dialY, 5)
+			love.graphics.setColor(0.05, 0.09, 0.12, 0.9)
+			love.graphics.circle("line", dialX, dialY, 5)
+
+			local centerText = string.format("%4d kph", math.floor(airSpeedKph + 0.5))
+			local mphText = string.format("%3d mph", math.floor(airSpeedMph + 0.5))
+			local overspeedText = (airSpeedKph > redlineKph) and "OVERSPEED" or "IAS"
+			local centerW = math.max(love.graphics.getFont():getWidth(centerText),
+				love.graphics.getFont():getWidth(mphText)) + 12
+			drawHudPlate(dialX - centerW * 0.5, dialY - 20, centerW, 42, 6)
+			love.graphics.setColor(hudTheme.text[1], hudTheme.text[2], hudTheme.text[3], hudTheme.text[4])
+			love.graphics.print(centerText, dialX - (love.graphics.getFont():getWidth(centerText) * 0.5), dialY - 17)
+			love.graphics.setColor(hudTheme.textDim[1], hudTheme.textDim[2], hudTheme.textDim[3], hudTheme.textDim[4])
+			love.graphics.print(mphText, dialX - (love.graphics.getFont():getWidth(mphText) * 0.5), dialY - 2)
+			if airSpeedKph > redlineKph then
+				local x, y = dialX - (love.graphics.getFont():getWidth(overspeedText) * 0.5), dialY + 28
+				love.graphics.rectangle("line", x - 20, y - 3, dialSize / 4, 40)
+				love.graphics.setColor(hudTheme.overspeed[1], hudTheme.overspeed[2], hudTheme.overspeed[3], 0.95)
+				love.graphics.print(overspeedText, x, y)
+			else
+				local x, y = dialX - (love.graphics.getFont():getWidth(overspeedText) * 0.5), dialY + 28
+				love.graphics.rectangle("line", x - 20, y - 3, 60, 20)
+				love.graphics.setColor(0.66, 0.82, 0.98, 0.9)
+				love.graphics.print(overspeedText, x, y)
+			end
 		end
 
-		local gaugeStart = math.rad(150)
-		local gaugeSweep = math.rad(240)
-		local speedRatio = clampedKph / 1000
-		local needleAngle = gaugeStart + speedRatio * gaugeSweep
-		local needleLen = dialSize * 0.4
-		local nx = dialX + math.cos(needleAngle) * needleLen
-		local ny = dialY + math.sin(needleAngle) * needleLen
-		love.graphics.setLineWidth(2.5)
-		if airSpeedKph > 1000 then
-			love.graphics.setColor(hudTheme.overspeed[1], hudTheme.overspeed[2], hudTheme.overspeed[3], hudTheme.overspeed[4])
-		else
-			love.graphics.setColor(hudTheme.needle[1], hudTheme.needle[2], hudTheme.needle[3], hudTheme.needle[4])
+		if hudSettings.showThrottle then
+			local throttleW = 118
+			local throttleH = 82
+			local throttleX = 18
+			local throttleY = dialY - dialSize * 0.5 - throttleH - 10
+			if throttleY < 14 then
+				throttleY = 14
+			end
+			drawHudPlate(throttleX, throttleY, throttleW, throttleH, 6)
+			love.graphics.setColor(hudTheme.text[1], hudTheme.text[2], hudTheme.text[3], hudTheme.text[4])
+			love.graphics.print("THROTTLE", throttleX + 10, throttleY + 8)
+			love.graphics.setColor(hudTheme.accent[1], hudTheme.accent[2], hudTheme.accent[3], hudTheme.accent[4])
+			love.graphics.print(string.format("%03d%%", throttlePct), throttleX + 16, throttleY + 28)
+			love.graphics.setColor(hudTheme.textDim[1], hudTheme.textDim[2], hudTheme.textDim[3], hudTheme.textDim[4])
+			love.graphics.print(string.format("Thrust %.1f", thrustNow), throttleX + 10, throttleY + 56)
 		end
-		love.graphics.line(dialX, dialY, nx, ny)
-		love.graphics.setLineWidth(1)
-		love.graphics.setColor(0.88, 0.95, 1.0, 0.96)
-		love.graphics.circle("fill", dialX, dialY, 5)
-		love.graphics.setColor(0.05, 0.09, 0.12, 0.9)
-		love.graphics.circle("line", dialX, dialY, 5)
-
-		local centerText = string.format("%4d kph", math.floor(airSpeedKph + 0.5))
-		local mphText = string.format("%3d mph", math.floor(airSpeedMph + 0.5))
-		local overspeedText = (airSpeedKph > 1000) and "OVERSPEED" or "IAS"
-		local centerW = math.max(love.graphics.getFont():getWidth(centerText), love.graphics.getFont():getWidth(mphText)) + 12
-		drawHudPlate(dialX - centerW * 0.5, dialY - 20, centerW, 42, 6)
-		love.graphics.setColor(hudTheme.text[1], hudTheme.text[2], hudTheme.text[3], hudTheme.text[4])
-		love.graphics.print(centerText, dialX - (love.graphics.getFont():getWidth(centerText) * 0.5), dialY - 17)
-		love.graphics.setColor(hudTheme.textDim[1], hudTheme.textDim[2], hudTheme.textDim[3], hudTheme.textDim[4])
-		love.graphics.print(mphText, dialX - (love.graphics.getFont():getWidth(mphText) * 0.5), dialY - 2)
-		if airSpeedKph > 1000 then
-			local x, y = dialX - (love.graphics.getFont():getWidth(overspeedText) * 0.5), dialY + 28
-			love.graphics.rectangle("line", x - 20, y - 3, dialSize / 4, 40)
-			love.graphics.setColor(hudTheme.overspeed[1], hudTheme.overspeed[2], hudTheme.overspeed[3], 0.95)
-			love.graphics.print(overspeedText, x, y)
-		else
-			local x, y = dialX - (love.graphics.getFont():getWidth(overspeedText) * 0.5), dialY + 28
-			love.graphics.rectangle("line", x - 20, y - 3, 60, 20)
-			love.graphics.setColor(0.66, 0.82, 0.98, 0.9)
-			love.graphics.print(overspeedText, x, y)
-		end
-
-		local throttleW = 118
-		local throttleH = 82
-		local throttleX = 18
-		local throttleY = dialY - dialSize * 0.5 - throttleH - 10
-		if throttleY < 14 then
-			throttleY = 14
-		end
-		drawHudPlate(throttleX, throttleY, throttleW, throttleH, 6)
-		love.graphics.setColor(hudTheme.text[1], hudTheme.text[2], hudTheme.text[3], hudTheme.text[4])
-		love.graphics.print("THROTTLE", throttleX + 10, throttleY + 8)
-		love.graphics.setColor(hudTheme.accent[1], hudTheme.accent[2], hudTheme.accent[3], hudTheme.accent[4])
-		love.graphics.print(string.format("%03d%%", throttlePct), throttleX + 16, throttleY + 28)
-		love.graphics.setColor(hudTheme.textDim[1], hudTheme.textDim[2], hudTheme.textDim[3], hudTheme.textDim[4])
-		love.graphics.print(string.format("Thrust %.1f", thrustNow), throttleX + 10, throttleY + 56)
 
 		camera.yoke = camera.yoke or { pitch = 0, yaw = 0, roll = 0 }
 		local yoke = camera.yoke
-		local controlW = clamp(math.floor(w * 0.31), 220, 340)
-		local controlH = clamp(math.floor(h * 0.2), 124, 180)
-		local controlX = math.floor((w - controlW) * 0.5)
-		local controlY = h - controlH - 14
-		local controlCanvas = ensureControlPanelCanvas(controlW, controlH)
-		if controlCanvas then
-			love.graphics.setColor(1, 1, 1, 0.98)
-			love.graphics.draw(controlCanvas, controlX, controlY)
-		else
-			drawHudPlate(controlX, controlY, controlW, controlH, 9)
+		if hudSettings.showFlightControls then
+			local controlW = clamp(math.floor(w * 0.31), 220, 340)
+			local controlH = clamp(math.floor(h * 0.2), 124, 180)
+			local controlX = math.floor((w - controlW) * 0.5)
+			local controlY = h - controlH - 14
+			local controlCanvas = ensureControlPanelCanvas(controlW, controlH)
+			if controlCanvas then
+				love.graphics.setColor(1, 1, 1, 0.98)
+				love.graphics.draw(controlCanvas, controlX, controlY)
+			else
+				drawHudPlate(controlX, controlY, controlW, controlH, 9)
+			end
+
+			local yokeSize = math.floor(math.min(controlW * 0.42, controlH * 0.56))
+			local yokeX = controlX + 18
+			local yokeY = controlY + 14
+			local centerX = yokeX + yokeSize * 0.5
+			local centerY = yokeY + yokeSize * 0.5
+			local throw = yokeSize * 0.34
+			local yokeHandleSize = 16
+			local yokeHandleX = centerX + clamp(-yoke.roll or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
+			local yokeHandleY = centerY + clamp(-yoke.pitch or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
+
+			love.graphics.setColor(0.04, 0.07, 0.1, 0.84)
+			love.graphics.rectangle("fill", yokeX, yokeY, yokeSize, yokeSize, 4, 4)
+			love.graphics.setColor(0.74, 0.9, 1.0, 0.9)
+			love.graphics.rectangle("line", yokeX, yokeY, yokeSize, yokeSize, 4, 4)
+			love.graphics.line(centerX, yokeY + 8, centerX, yokeY + yokeSize - 8)
+			love.graphics.line(yokeX + 8, centerY, yokeX + yokeSize - 8, centerY)
+
+			love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
+			love.graphics.rectangle("fill", yokeHandleX, yokeHandleY, yokeHandleSize, yokeHandleSize, 2, 2)
+			love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
+			love.graphics.rectangle("line", yokeHandleX, yokeHandleY, yokeHandleSize, yokeHandleSize, 2, 2)
+
+			local rudderWidth = math.floor(controlW * 0.42)
+			local rudderHeight = 10
+			local rudderX = controlX + controlW - rudderWidth - 18
+			local rudderY = controlY + math.floor(controlH * 0.64)
+			local rudderHandleSize = rudderHeight + 8
+			local rudderRatio = (clamp(yoke.yaw or 0, -1, 1) + 1) * 0.5
+			local rudderHandleX = rudderX + rudderRatio * rudderWidth - (rudderHandleSize * 0.5)
+			rudderHandleX = clamp(rudderHandleX, rudderX - (rudderHandleSize * 0.5),
+				rudderX + rudderWidth - (rudderHandleSize * 0.5))
+
+			love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
+			love.graphics.rectangle("fill", rudderX, rudderY, rudderWidth, rudderHeight, 3, 3)
+			love.graphics.setColor(0.75, 0.85, 0.92, 0.9)
+			love.graphics.rectangle("line", rudderX, rudderY, rudderWidth, rudderHeight, 3, 3)
+			love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
+			love.graphics.rectangle("fill", rudderHandleX, rudderY - 4, rudderHandleSize, rudderHandleSize, 2, 2)
+			love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
+			love.graphics.rectangle("line", rudderHandleX, rudderY - 4, rudderHandleSize, rudderHandleSize, 2, 2)
+			love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
+			love.graphics.print("YOKE", yokeX + 20, yokeY + yokeSize + 5)
+			love.graphics.print("RUDDER", rudderX + 8, rudderY + rudderHeight + 6)
+			love.graphics.setColor(0.65, 0.8, 0.95, 0.9)
+			love.graphics.print(
+				string.format("P %.2f  R %.2f  Y %.2f", yoke.pitch or 0, yoke.roll or 0, yoke.yaw or 0),
+				controlX + 14,
+				controlY + controlH - love.graphics.getFont():getHeight() - 7
+			)
 		end
-
-		local yokeSize = math.floor(math.min(controlW * 0.42, controlH * 0.56))
-		local yokeX = controlX + 18
-		local yokeY = controlY + 14
-		local centerX = yokeX + yokeSize * 0.5
-		local centerY = yokeY + yokeSize * 0.5
-		local throw = yokeSize * 0.34
-		local yokeHandleSize = 16
-		local yokeHandleX = centerX + clamp(-yoke.roll or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
-		local yokeHandleY = centerY + clamp(-yoke.pitch or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
-
-		love.graphics.setColor(0.04, 0.07, 0.1, 0.84)
-		love.graphics.rectangle("fill", yokeX, yokeY, yokeSize, yokeSize, 4, 4)
-		love.graphics.setColor(0.74, 0.9, 1.0, 0.9)
-		love.graphics.rectangle("line", yokeX, yokeY, yokeSize, yokeSize, 4, 4)
-		love.graphics.line(centerX, yokeY + 8, centerX, yokeY + yokeSize - 8)
-		love.graphics.line(yokeX + 8, centerY, yokeX + yokeSize - 8, centerY)
-
-		love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
-		love.graphics.rectangle("fill", yokeHandleX, yokeHandleY, yokeHandleSize, yokeHandleSize, 2, 2)
-		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
-		love.graphics.rectangle("line", yokeHandleX, yokeHandleY, yokeHandleSize, yokeHandleSize, 2, 2)
-
-		local rudderWidth = math.floor(controlW * 0.42)
-		local rudderHeight = 10
-		local rudderX = controlX + controlW - rudderWidth - 18
-		local rudderY = controlY + math.floor(controlH * 0.64)
-		local rudderHandleSize = rudderHeight + 8
-		local rudderRatio = (clamp(yoke.yaw or 0, -1, 1) + 1) * 0.5
-		local rudderHandleX = rudderX + rudderRatio * rudderWidth - (rudderHandleSize * 0.5)
-		rudderHandleX = clamp(rudderHandleX, rudderX - (rudderHandleSize * 0.5), rudderX + rudderWidth - (rudderHandleSize * 0.5))
-
-		love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
-		love.graphics.rectangle("fill", rudderX, rudderY, rudderWidth, rudderHeight, 3, 3)
-		love.graphics.setColor(0.75, 0.85, 0.92, 0.9)
-		love.graphics.rectangle("line", rudderX, rudderY, rudderWidth, rudderHeight, 3, 3)
-		love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
-		love.graphics.rectangle("fill", rudderHandleX, rudderY - 4, rudderHandleSize, rudderHandleSize, 2, 2)
-		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
-		love.graphics.rectangle("line", rudderHandleX, rudderY - 4, rudderHandleSize, rudderHandleSize, 2, 2)
-		love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
-		love.graphics.print("YOKE", yokeX + 20, yokeY + yokeSize + 5)
-		love.graphics.print("RUDDER", rudderX + 8, rudderY + rudderHeight + 6)
-		love.graphics.setColor(0.65, 0.8, 0.95, 0.9)
-		love.graphics.print(
-			string.format("P %.2f  R %.2f  Y %.2f", yoke.pitch or 0, yoke.roll or 0, yoke.yaw or 0),
-			controlX + 14,
-			controlY + controlH - love.graphics.getFont():getHeight() - 7
-		)
 	end
 
-	if not pauseMenu.active then
+	if not pauseMenu.active and hudSettings.showPeerIndicators then
 		drawWorldPeerIndicators(w, h, renderCamera or resolveActiveRenderCamera() or camera)
 	end
 
-	if mapState.visible then
+	if hudSettings.showMap and mapState.visible then
 		local mapCam = updateLogicalMapCamera()
 		if mapCam then
 			local panelSize = clamp(
@@ -4644,7 +5623,8 @@ local function drawHud(w, h, cx, cy, renderCamera)
 			end
 
 			if localPlayerObject and localPlayerObject.pos then
-				drawMarker(localPlayerObject.pos[1], localPlayerObject.pos[3], { 0.96, 0.36, 0.12, 0.95 }, localMarkerSize)
+				drawMarker(localPlayerObject.pos[1], localPlayerObject.pos[3], { 0.96, 0.36, 0.12, 0.95 },
+					localMarkerSize)
 			end
 			for peerId, peerObj in pairs(peers) do
 				if peerObj and peerObj.pos then
@@ -4676,14 +5656,15 @@ local function drawHud(w, h, cx, cy, renderCamera)
 			love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
 			love.graphics.rectangle("line", panelX, panelY, panelSize, panelSize, 6, 6)
 			love.graphics.print(
-				string.format("Map %s (M tap/toggle, hold+Up/Down zoom)", zoomLabels[mapState.zoomIndex] or tostring(mapState.zoomIndex)),
+				string.format("Map %s (M tap/toggle, hold+Up/Down zoom)",
+					zoomLabels[mapState.zoomIndex] or tostring(mapState.zoomIndex)),
 				panelX,
 				panelY + panelSize + 4
 			)
 		end
 	end
 
-	if camera then
+	if camera and hudSettings.showGeoInfo then
 		local lat, lon = worldToGeo(camera.pos[1], camera.pos[3])
 		local metersPerUnit = math.max(1e-6, tonumber(geoConfig.metersPerUnit) or 1.0)
 		local groundY = sampleGroundHeightAtWorld(camera.pos[1], camera.pos[3], activeGroundParams or defaultGroundParams)
@@ -4722,11 +5703,40 @@ function love.draw()
 		worldTintG = 0.52 + 0.48 * math.sin(t * 2.71 + 2.0)
 		worldTintB = 0.52 + 0.48 * math.sin(t * 3.19 + 4.1)
 	end
+	local renderScale = 1 -- clamp(graphicsSettings.renderScale or 1.0, 0.5, 1.5)
+	local scaledWorld = false -- math.abs(renderScale - 1.0) > 0.001
+	local worldW = math.max(320, math.floor(screen.w * renderScale + 0.5))
+	local worldH = math.max(180, math.floor(screen.h * renderScale + 0.5))
+	local worldScreen = { w = worldW, h = worldH }
+	local worldScaleX = screen.w / worldW
+	local worldScaleY = screen.h / worldH
 
 	local usedGpu = false
 	if useGpuRenderer and renderer.isReady() then
-		love.graphics.setColor(worldTintR, worldTintG, worldTintB, 1)
-		local ok, renderOk, triOrErr = pcall(renderer.drawWorld, renderObjects, renderCamera, { 0.2, 0.2, 0.75, 1.0 })
+		local ok, renderOk, triOrErr
+		if scaledWorld then
+			local worldCanvas = ensureWorldRenderCanvas(worldW, worldH)
+			if worldCanvas then
+				local prevCanvas = love.graphics.getCanvas()
+				love.graphics.setCanvas(worldCanvas)
+				love.graphics.clear(0.2, 0.2, 0.75, 1.0)
+				renderer.resize(worldScreen)
+				ok, renderOk, triOrErr = pcall(renderer.drawWorld, renderObjects, renderCamera, { 0.2, 0.2, 0.75, 1.0 })
+				love.graphics.setCanvas(prevCanvas)
+				if ok and renderOk then
+					love.graphics.setColor(worldTintR, worldTintG, worldTintB, 1)
+					love.graphics.draw(worldCanvas, 0, 0, 0, worldScaleX, worldScaleY)
+				end
+			else
+				renderer.resize(screen)
+				love.graphics.setColor(worldTintR, worldTintG, worldTintB, 1)
+				ok, renderOk, triOrErr = pcall(renderer.drawWorld, renderObjects, renderCamera, { 0.2, 0.2, 0.75, 1.0 })
+			end
+		else
+			renderer.resize(screen)
+			love.graphics.setColor(worldTintR, worldTintG, worldTintB, 1)
+			ok, renderOk, triOrErr = pcall(renderer.drawWorld, renderObjects, renderCamera, { 0.2, 0.2, 0.75, 1.0 })
+		end
 		if ok and renderOk then
 			usedGpu = true
 			renderMode = "GPU"
@@ -4745,13 +5755,14 @@ function love.draw()
 	if not usedGpu then
 		love.graphics.setColor(0.2, 0.2, 0.75, 0.8)
 		love.graphics.rectangle("fill", 0, 0, screen.w, screen.h)
+		local drawScreen = scaledWorld and worldScreen or screen
 
 		-- reset z-buffer
-		for i = 1, screen.w * screen.h do
+		for i = 1, drawScreen.w * drawScreen.h do
 			zBuffer[i] = math.huge
 		end
 
-		local imageData = love.image.newImageData(screen.w, screen.h)
+		local imageData = love.image.newImageData(drawScreen.w, drawScreen.h)
 		local opaqueObjects = {}
 		local transparentObjects = {}
 		for _, obj in ipairs(renderObjects) do
@@ -4764,22 +5775,29 @@ function love.draw()
 		end
 
 		for _, obj in ipairs(opaqueObjects) do
-			imageData = engine.drawObject(obj, false, renderCamera, vector3, q, screen, zBuffer, imageData, true)
+			imageData = engine.drawObject(obj, false, renderCamera, vector3, q, drawScreen, zBuffer, imageData, true)
 		end
 
 		table.sort(transparentObjects, function(a, b)
-			return viewMath.cameraSpaceDepthForObject(a, renderCamera, q) > viewMath.cameraSpaceDepthForObject(b, renderCamera, q)
+			return viewMath.cameraSpaceDepthForObject(a, renderCamera, q) >
+			viewMath.cameraSpaceDepthForObject(b, renderCamera, q)
 		end)
 		for _, obj in ipairs(transparentObjects) do
-			imageData = engine.drawObject(obj, false, renderCamera, vector3, q, screen, zBuffer, imageData, false)
+			imageData = engine.drawObject(obj, false, renderCamera, vector3, q, drawScreen, zBuffer, imageData, false)
 		end
-		if frameImage then
+		if frameImage and frameImageW == drawScreen.w and frameImageH == drawScreen.h then
 			frameImage:replacePixels(imageData)
 		else
 			frameImage = love.graphics.newImage(imageData)
+			frameImageW = drawScreen.w
+			frameImageH = drawScreen.h
 		end
 		love.graphics.setColor(worldTintR, worldTintG, worldTintB, 1)
-		love.graphics.draw(frameImage)
+		if scaledWorld then
+			love.graphics.draw(frameImage, 0, 0, 0, worldScaleX, worldScaleY)
+		else
+			love.graphics.draw(frameImage)
+		end
 	end
 
 	if showDebugOverlay then
@@ -4802,7 +5820,8 @@ function love.draw()
 		love.graphics.setColor(1, 1, 1)
 		love.graphics.print(
 			"Esc = pause menu (see Help/Controls tabs for full controls)\n" ..
-			"Render: " .. tostring(renderMode) .. " | Triangles: " .. tostring(math.floor(triangleCount)) .. " | FPS: " ..
+			"Render: " ..
+			tostring(renderMode) .. " | Triangles: " .. tostring(math.floor(triangleCount)) .. " | FPS: " ..
 			tostring(love.timer.getFPS()) .. "\n" ..
 			string.format(
 				"View: %s | AltLook: %s | Map: %s (z%d)\n",
@@ -4851,6 +5870,10 @@ function love.resize(w, h)
 	refreshUiFonts()
 	resetHudCaches()
 	invalidateMapCache()
+	syncGraphicsSettingsFromWindow()
+	if renderer.setClipPlanes then
+		renderer.setClipPlanes(0.1, graphicsSettings.drawDistance)
+	end
 
 	zBuffer = {}
 	for i = 1, screen.w * screen.h do
@@ -4858,7 +5881,10 @@ function love.resize(w, h)
 	end
 
 	frameImage = nil
+	frameImageW = 0
+	frameImageH = 0
+	worldRenderCanvas = nil
+	worldRenderW = 0
+	worldRenderH = 0
 	logger.log(string.format("Window resized to %dx%d", w, h))
-
 end
-
