@@ -166,8 +166,8 @@ modelTransferState = {
 	chunkSize = 720,
 	maxChunksPerTick = 1,
 	transferTimeout = 15.0,
-	maxRawBytes = 8 * 1024 * 1024,
-	maxEncodedBytes = 12 * 1024 * 1024,
+	maxRawBytes = 100 * 1024 * 1024,
+	maxEncodedBytes = 200 * 1024 * 1024,
 	requestedAt = {},
 	outgoing = {},
 	incoming = {}
@@ -178,7 +178,7 @@ local stateNet = {
 	forceSend = true
 }
 local forceStateSync
-local worldHalfExtent = 1000
+local worldHalfExtent = 2000
 local defaultGroundParams = {
 	seed = math.random(0, 999999),
 	tileSize = 20,
@@ -188,15 +188,18 @@ local defaultGroundParams = {
 	curvature = 0.00000003,
 	recenterStep = 48,
 	roadCount = 6,
+	waterRatio = 0.15,
 	roadDensity = 0.10,
 	fieldCount = 10,
 	fieldMinSize = 40,
 	fieldMaxSize = 120,
 	grassColor = { 0.20, 0.62, 0.22 },
+	waterColor = { 0.10, 0.10, 0.50 },
 	roadColor = { 0.10, 0.10, 0.10 },
 	fieldColor = { 0.35, 0.45, 0.20 },
 	grassVar = { 0.05, 0.10, 0.05 },
 	roadVar = { 0.02, 0.02, 0.02 },
+	waterVar = { 0.02, 0.02, 0.02 },
 	fieldVar = { 0.04, 0.06, 0.04 }
 }
 local activeGroundParams = nil
@@ -290,28 +293,28 @@ local pauseMenu = {
 	},
 	settingsItems = {
 		graphics = {
-			{ id = "window_mode",   label = "Window Mode",       kind = "cycle",  help = "Switch between windowed, borderless fullscreen, and exclusive fullscreen." },
-			{ id = "resolution",    label = "Resolution",        kind = "cycle",  help = "Target display resolution. In borderless mode this follows desktop resolution." },
-			{ id = "apply_video",   label = "Apply Display",     kind = "action", help = "Apply the selected window mode and resolution now." },
-			{ id = "render_scale",  label = "Render Scale",      kind = "range",  min = 0.5,                                                                              max = 1.5,   step = 0.05,   help = "Internal 3D render scale separate from display resolution." },
-			{ id = "draw_distance", label = "Draw Distance",     kind = "range",  min = 300,                                                                              max = 5000,  step = 100,    help = "How far objects remain rendered from the active camera." },
-			{ id = "vsync",         label = "VSync",             kind = "toggle", help = "Toggle vertical sync for display presentation." },
-			{ id = "renderer",      label = "Renderer",          kind = "toggle", help = "Switch between GPU and CPU renderer paths." },
-			{ id = "fov",           label = "Field of View",     kind = "range",  min = 60,                                                                               max = 120,   step = 5,      help = "Adjust camera FOV in degrees." },
-			{ id = "speed",         label = "Move Speed",        kind = "range",  min = 2,                                                                                max = 30,    step = 1,      help = "Adjust player movement speed." },
-			{ id = "sensitivity",   label = "Mouse Sensitivity", kind = "range",  min = 0.0004,                                                                           max = 0.004, step = 0.0002, help = "Adjust mouse look sensitivity." },
-			{ id = "invertY",       label = "Invert Look Y",     kind = "toggle", help = "Invert vertical mouse look direction." },
-			{ id = "crosshair",     label = "Crosshair",         kind = "toggle", help = "Show or hide center crosshair dot." },
-			{ id = "overlay",       label = "Debug Overlay",     kind = "toggle", help = "Toggle top-left help/perf text." }
+			{ id = "window_mode",   label = "Window Mode",               kind = "cycle",  help = "Switch between windowed, borderless fullscreen, and exclusive fullscreen." },
+			{ id = "resolution",    label = "Resolution",                kind = "cycle",  help = "Target display resolution. In borderless mode this follows desktop resolution." },
+			{ id = "apply_video",   label = "Apply Display",             kind = "action", help = "Apply the selected window mode and resolution now." },
+			{ id = "render_scale",  label = "Render Scale - unplugged",  kind = "range",  min = 0.5,                                                                              max = 1.5,   step = 0.05,   help = "Internal 3D render scale separate from display resolution." },
+			{ id = "draw_distance", label = "Draw Distance - unplugged", kind = "range",  min = 300,                                                                              max = 5000,  step = 100,    help = "How far objects remain rendered from the active camera." },
+			{ id = "vsync",         label = "VSync",                     kind = "toggle", help = "Toggle vertical sync for display presentation." },
+			{ id = "renderer",      label = "Renderer",                  kind = "toggle", help = "Switch between GPU and CPU renderer paths." },
+			{ id = "fov",           label = "Field of View",             kind = "range",  min = 60,                                                                               max = 120,   step = 5,      help = "Adjust camera FOV in degrees." },
+			{ id = "speed",         label = "Move Speed",                kind = "range",  min = 2,                                                                                max = 30,    step = 1,      help = "Adjust player movement speed." },
+			{ id = "sensitivity",   label = "Mouse Sensitivity",         kind = "range",  min = 0.0004,                                                                           max = 0.004, step = 0.0002, help = "Adjust mouse look sensitivity." },
+			{ id = "invertY",       label = "Invert Look Y",             kind = "toggle", help = "Invert vertical mouse look direction." },
+			{ id = "crosshair",     label = "Crosshair",                 kind = "toggle", help = "Show or hide center crosshair dot." },
+			{ id = "overlay",       label = "Debug Overlay",             kind = "toggle", help = "Toggle top-left help/perf text." }
 		}
 	},
 	characterItems = {
 		plane = {
 			{ id = "load_custom_stl",         label = "Load Plane STL", kind = "action", help = "Open a path prompt and load any STL from disk (or drop a file on the window)." },
-			{ id = "model_scale",             label = "Plane Scale",    kind = "range",  min = 0.5,                                                                             max = 3.0, step = 0.05, help = "Scale normalized plane models for all clients." },
+			{ id = "model_scale",             label = "Plane Scale",    kind = "range",  min = 0.5,                                                                             max = 5.0, step = 0.05, help = "Scale normalized plane models for all clients." },
 			{ id = "plane_preview_yaw",       label = "Preview Yaw",    kind = "range",  min = -180,                                                                            max = 180, step = 5,    help = "Rotate the plane preview model around the vertical axis." },
 			{ id = "plane_preview_pitch",     label = "Preview Pitch",  kind = "range",  min = -70,                                                                             max = 70,  step = 5,    help = "Rotate the plane preview model around the lateral axis." },
-			{ id = "plane_preview_zoom",      label = "Preview Zoom",   kind = "range",  min = 0.5,                                                                             max = 2.0, step = 0.05, help = "Scale only the preview display model." },
+			{ id = "plane_preview_zoom",      label = "Preview Zoom",   kind = "range",  min = 0.5,                                                                             max = 4.0, step = 0.05, help = "Scale only the preview display model." },
 			{ id = "plane_preview_auto_spin", label = "Auto Spin",      kind = "toggle", help = "When enabled, preview yaw rotates automatically." }
 		},
 		walking = {
@@ -326,11 +329,11 @@ local pauseMenu = {
 	hudItems = {
 		speedometer = {
 			{ id = "hud_speedometer_enabled",    label = "Speedometer",     kind = "toggle", help = "Show/hide the speedometer gauge in flight mode." },
-			{ id = "hud_speedometer_max_kph",    label = "Max KPH",         kind = "range",  min = 200,                                               max = 2200, step = 50, help = "Maximum speed represented by the speedometer arc." },
-			{ id = "hud_speedometer_minor_step", label = "Minor Tick Step", kind = "range",  min = 10,                                                max = 200,  step = 5,  help = "KPH step between minor ticks." },
-			{ id = "hud_speedometer_major_step", label = "Major Tick Step", kind = "range",  min = 50,                                                max = 500,  step = 10, help = "KPH step between major ticks." },
-			{ id = "hud_speedometer_label_step", label = "Label Step",      kind = "range",  min = 50,                                                max = 600,  step = 10, help = "KPH step used for numeric labels on major ticks." },
-			{ id = "hud_speedometer_redline",    label = "Redline KPH",     kind = "range",  min = 100,                                               max = 2200, step = 25, help = "KPH threshold where overspeed highlighting begins." }
+			{ id = "hud_speedometer_max_kph",    label = "Max KPH",         kind = "range",  min = 50,                                                max = 2500, step = 50, help = "Maximum speed represented by the speedometer arc." },
+			{ id = "hud_speedometer_minor_step", label = "Minor Tick Step", kind = "range",  min = 1,                                                 max = 200,  step = 5,  help = "KPH step between minor ticks." },
+			{ id = "hud_speedometer_major_step", label = "Major Tick Step", kind = "range",  min = 5,                                                 max = 500,  step = 10, help = "KPH step between major ticks." },
+			{ id = "hud_speedometer_label_step", label = "Label Step",      kind = "range",  min = 5,                                                 max = 600,  step = 10, help = "KPH step used for numeric labels on major ticks." },
+			{ id = "hud_speedometer_redline",    label = "Redline KPH",     kind = "range",  min = 50,                                                max = 2500, step = 50, help = "KPH threshold where overspeed highlighting begins." }
 		},
 		modules = {
 			{ id = "hud_show_throttle",        label = "Throttle Panel",  kind = "toggle", help = "Show/hide the throttle HUD module in flight mode." },
@@ -495,22 +498,28 @@ local function groundParamsSignature(params)
 		return "none"
 	end
 	local g = params.grassColor or { 0, 0, 0 }
+	local wc = params.waterColor or params.waterColour or { 0, 0, 0 }
 	local r = params.roadColor or { 0, 0, 0 }
 	local f = params.fieldColor or { 0, 0, 0 }
 	local gv = params.grassVar or { 0, 0, 0 }
+	local wv = params.waterVar or { 0, 0, 0 }
 	local rv = params.roadVar or { 0, 0, 0 }
 	local fv = params.fieldVar or { 0, 0, 0 }
+	local wr = clamp(tonumber(params.waterRatio) or 0, 0, 1)
 	return table.concat({
 		tostring(params.seed or 0),
 		string.format("%.5f", tonumber(params.tileSize) or 0),
 		tostring(params.gridCount or 0),
-		string.format("%.5f", tonumber(params.roadDensity) or 0),
 		tostring(params.roadCount or 0),
+		string.format("%.5f", wr),
+		string.format("%.5f", tonumber(params.roadDensity) or 0),
 		tostring(params.fieldCount or 0),
 		string.format("%.3f,%.3f,%.3f", g[1] or 0, g[2] or 0, g[3] or 0),
+		string.format("%.3f,%.3f,%.3f", wc[1] or 0, wc[2] or 0, wc[3] or 0),
 		string.format("%.3f,%.3f,%.3f", r[1] or 0, r[2] or 0, r[3] or 0),
 		string.format("%.3f,%.3f,%.3f", f[1] or 0, f[2] or 0, f[3] or 0),
 		string.format("%.3f,%.3f,%.3f", gv[1] or 0, gv[2] or 0, gv[3] or 0),
+		string.format("%.3f,%.3f,%.3f", wv[1] or 0, wv[2] or 0, wv[3] or 0),
 		string.format("%.3f,%.3f,%.3f", rv[1] or 0, rv[2] or 0, rv[3] or 0),
 		string.format("%.3f,%.3f,%.3f", fv[1] or 0, fv[2] or 0, fv[3] or 0)
 	}, "|")
@@ -1964,7 +1973,10 @@ function buildGroundSnapshotPacket(now)
 		encodeColor3Token(params.fieldColor),
 		encodeColor3Token(params.grassVar),
 		encodeColor3Token(params.roadVar),
-		encodeColor3Token(params.fieldVar)
+		encodeColor3Token(params.fieldVar),
+		formatNetFloat(params.waterRatio or defaultGroundParams.waterRatio),
+		encodeColor3Token(params.waterColor or defaultGroundParams.waterColor),
+		encodeColor3Token(params.waterVar or defaultGroundParams.waterVar)
 	}
 	return table.concat(parts, "|")
 end
@@ -1992,6 +2004,13 @@ function applyGroundSnapshotParts(parts, senderId)
 		return false
 	end
 
+	local hasWaterFields = #parts >= 24
+	local waterRatio = hasWaterFields and tonumber(parts[21]) or defaultGroundParams.waterRatio
+	local waterColor = hasWaterFields and decodeColor3Token(parts[22], defaultGroundParams.waterColor) or
+		groundSystem.cloneColor3(defaultGroundParams.waterColor)
+	local waterVar = hasWaterFields and decodeColor3Token(parts[23], defaultGroundParams.waterVar) or
+		groundSystem.cloneColor3(defaultGroundParams.waterVar)
+
 	local params = groundSystem.normalizeGroundParams({
 		seed = tonumber(parts[3]),
 		tileSize = tonumber(parts[4]),
@@ -2010,7 +2029,10 @@ function applyGroundSnapshotParts(parts, senderId)
 		fieldColor = decodeColor3Token(parts[17], defaultGroundParams.fieldColor),
 		grassVar = decodeColor3Token(parts[18], defaultGroundParams.grassVar),
 		roadVar = decodeColor3Token(parts[19], defaultGroundParams.roadVar),
-		fieldVar = decodeColor3Token(parts[20], defaultGroundParams.fieldVar)
+		fieldVar = decodeColor3Token(parts[20], defaultGroundParams.fieldVar),
+		waterRatio = waterRatio,
+		waterColor = waterColor,
+		waterVar = waterVar
 	}, defaultGroundParams)
 
 	rebuildGroundFromParams(params, "network peer " .. tostring(senderId))
@@ -2564,7 +2586,7 @@ local function applyGraphicsVideoMode()
 	local targetH = (selected and selected.h) or screen.h
 	local desktopW, desktopH = love.window.getDesktopDimensions()
 	local flags = {
-		vsync = graphicsSettings.vsync and 1 or 0,
+		vsync = graphicsSettings.vsync and true or false,
 		depth = true,
 		resizable = true
 	}
@@ -3176,7 +3198,7 @@ local function adjustPauseItem(item, direction, multiplier)
 
 	if item.id == "render_scale" then
 		local nextScale = clamp((graphicsSettings.renderScale or 1.0) + item.step * direction * scale, item.min, item
-		.max)
+			.max)
 		graphicsSettings.renderScale = math.floor(nextScale * 100 + 0.5) / 100
 		setPauseStatus("Render Scale: " .. getPauseItemValue(item), 1.2)
 		return
@@ -3223,7 +3245,7 @@ local function adjustPauseItem(item, direction, multiplier)
 
 	if item.id == "plane_preview_yaw" then
 		characterPreview.plane.yaw = clamp(characterPreview.plane.yaw + item.step * direction * scale, item.min, item
-		.max)
+			.max)
 		setPauseStatus("Plane Preview Yaw: " .. getPauseItemValue(item), 1.2)
 		return
 	end
@@ -4296,7 +4318,7 @@ function drawModelLoadPrompt(layout)
 	local promptY = layout.panelY + layout.panelH - promptH - 12
 	local isCallsignPrompt = modelLoadPrompt.mode == "callsign"
 	local targetLabel = isCallsignPrompt and "Callsign" or
-	((modelLoadTargetRole == "walking") and "Walking STL" or "Plane STL")
+		((modelLoadTargetRole == "walking") and "Walking STL" or "Plane STL")
 	local prefix = targetLabel .. ": "
 	local left = modelLoadPrompt.text:sub(1, modelLoadPrompt.cursor)
 	local cursorX = promptX + 10 + love.graphics.getFont():getWidth(prefix .. left)
@@ -5703,7 +5725,7 @@ function love.draw()
 		worldTintG = 0.52 + 0.48 * math.sin(t * 2.71 + 2.0)
 		worldTintB = 0.52 + 0.48 * math.sin(t * 3.19 + 4.1)
 	end
-	local renderScale = 1 -- clamp(graphicsSettings.renderScale or 1.0, 0.5, 1.5)
+	local renderScale = 1  -- clamp(graphicsSettings.renderScale or 1.0, 0.5, 1.5)
 	local scaledWorld = false -- math.abs(renderScale - 1.0) > 0.001
 	local worldW = math.max(320, math.floor(screen.w * renderScale + 0.5))
 	local worldH = math.max(180, math.floor(screen.h * renderScale + 0.5))
@@ -5780,7 +5802,7 @@ function love.draw()
 
 		table.sort(transparentObjects, function(a, b)
 			return viewMath.cameraSpaceDepthForObject(a, renderCamera, q) >
-			viewMath.cameraSpaceDepthForObject(b, renderCamera, q)
+				viewMath.cameraSpaceDepthForObject(b, renderCamera, q)
 		end)
 		for _, obj in ipairs(transparentObjects) do
 			imageData = engine.drawObject(obj, false, renderCamera, vector3, q, drawScreen, zBuffer, imageData, false)
