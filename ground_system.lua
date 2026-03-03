@@ -170,6 +170,9 @@ end
 
 function ground.normalizeGroundParams(params, defaultGroundParams)
 	local src = params or defaultGroundParams
+	local defaultWaterRatio = clamp(tonumber(defaultGroundParams.waterRatio) or 0.15, 0, 1)
+	local defaultWaterColor = defaultGroundParams.waterColor or defaultGroundParams.waterColour or { 0.1, 0.1, 0.3 }
+	local defaultWaterVar = defaultGroundParams.waterVar or { 0.02, 0.02, 0.02 }
 	local normalized = {
 		seed = math.floor(tonumber(src.seed) or defaultGroundParams.seed),
 		tileSize = math.max(0.05, tonumber(src.tileSize) or defaultGroundParams.tileSize),
@@ -179,14 +182,17 @@ function ground.normalizeGroundParams(params, defaultGroundParams)
 		curvature = math.max(0, tonumber(src.curvature) or defaultGroundParams.curvature),
 		recenterStep = math.max(1, tonumber(src.recenterStep) or defaultGroundParams.recenterStep),
 		roadCount = math.max(0, math.floor(tonumber(src.roadCount) or defaultGroundParams.roadCount)),
+		waterRatio = clamp(tonumber(src.waterRatio) or defaultWaterRatio, 0, 1),
 		roadDensity = clamp(tonumber(src.roadDensity) or defaultGroundParams.roadDensity, 0, 1),
 		fieldCount = math.max(0, math.floor(tonumber(src.fieldCount) or defaultGroundParams.fieldCount)),
 		fieldMinSize = math.max(1, math.floor(tonumber(src.fieldMinSize) or defaultGroundParams.fieldMinSize)),
 		fieldMaxSize = math.max(1, math.floor(tonumber(src.fieldMaxSize) or defaultGroundParams.fieldMaxSize)),
 		grassColor = ground.sanitizeColor3(src.grassColor, defaultGroundParams.grassColor),
+		waterColor = ground.sanitizeColor3(src.waterColor or src.waterColour, defaultWaterColor),
 		roadColor = ground.sanitizeColor3(src.roadColor, defaultGroundParams.roadColor),
 		fieldColor = ground.sanitizeColor3(src.fieldColor, defaultGroundParams.fieldColor),
 		grassVar = ground.sanitizeColor3(src.grassVar, defaultGroundParams.grassVar),
+		waterVar = ground.sanitizeColor3(src.waterVar, defaultWaterVar),
 		roadVar = ground.sanitizeColor3(src.roadVar, defaultGroundParams.roadVar),
 		fieldVar = ground.sanitizeColor3(src.fieldVar, defaultGroundParams.fieldVar)
 	}
@@ -216,14 +222,17 @@ function ground.groundParamsEqual(a, b)
 		a.curvature == b.curvature and
 		a.recenterStep == b.recenterStep and
 		a.roadCount == b.roadCount and
+		a.waterRatio == b.waterRatio and
 		a.roadDensity == b.roadDensity and
 		a.fieldCount == b.fieldCount and
 		a.fieldMinSize == b.fieldMinSize and
 		a.fieldMaxSize == b.fieldMaxSize and
 		ground.colorsEqual(a.grassColor, b.grassColor) and
+		ground.colorsEqual(a.waterColor, b.waterColor) and
 		ground.colorsEqual(a.roadColor, b.roadColor) and
 		ground.colorsEqual(a.fieldColor, b.fieldColor) and
 		ground.colorsEqual(a.grassVar, b.grassVar) and
+		ground.colorsEqual(a.waterVar, b.waterVar) and
 		ground.colorsEqual(a.roadVar, b.roadVar) and
 		ground.colorsEqual(a.fieldVar, b.fieldVar)
 end
@@ -263,21 +272,30 @@ function ground.sampleGroundColorAtWorld(worldX, worldZ, params)
 	local tileIndexZ = math.floor(worldZ / tileSize)
 	local roadWidth = 0.03 + clamp(tonumber(params.roadDensity) or 0, 0, 1) * 0.28
 	local roadFreq = 0.06 + ((tonumber(params.roadCount) or 0) * 0.012)
+	local waterChance = clamp(tonumber(params.waterRatio) or 0, 0, 1)
 	local fieldChance = clamp((tonumber(params.fieldCount) or 0) / 35, 0.08, 0.45)
 
 	local roadSignalX = math.abs(math.sin((tileIndexX + seed * 0.13) * roadFreq))
 	local roadSignalZ = math.abs(math.sin((tileIndexZ - seed * 0.21) * (roadFreq * 1.11)))
 	local regionNoise = hash01(math.floor(tileIndexX / 7), math.floor(tileIndexZ / 7), 41, seed)
+	local waterRegionNoise = hash01(math.floor(tileIndexX / 5), math.floor(tileIndexZ / 5), 59, seed)
+	local waterDetailNoise = hash01(tileIndexX, tileIndexZ, 73, seed)
+	local waterSignal = waterRegionNoise * 0.8 + waterDetailNoise * 0.2
 
 	local grass = params.grassColor or { 0.2, 0.62, 0.22 }
+	local water = params.waterColor or params.waterColour or { 0.1, 0.1, 0.1 }
 	local road = params.roadColor or { 0.1, 0.1, 0.1 }
 	local field = params.fieldColor or { 0.35, 0.45, 0.2 }
 	local grassVar = params.grassVar or { 0.05, 0.1, 0.05 }
+	local waterVar = params.waterVar or { 0.02, 0.02, 0.02 }
 	local roadVar = params.roadVar or { 0.02, 0.02, 0.02 }
 	local fieldVar = params.fieldVar or { 0.04, 0.06, 0.04 }
 
 	if roadSignalX < roadWidth or roadSignalZ < roadWidth then
 		return variedColor(road, roadVar, tileIndexX, tileIndexZ, 3, seed)
+	end
+	if waterSignal < waterChance then
+		return variedColor(water, waterVar, tileIndexX, tileIndexZ, 17, seed)
 	end
 	if regionNoise < fieldChance then
 		return variedColor(field, fieldVar, tileIndexX, tileIndexZ, 7, seed)
