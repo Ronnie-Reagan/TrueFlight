@@ -63,7 +63,7 @@ local localPlayerObject = nil
 local worldHalfExtent = 1000
 local defaultGroundParams = {
 	seed = math.random(0, 999999),
-	tileSize = 2,
+	tileSize = 20,
 	gridCount = 128,
 	baseHeight = 0,
 	tileThickness = 0.005,
@@ -4081,8 +4081,8 @@ local function drawHud(w, h, cx, cy)
 		local centerY = yokeY + yokeSize * 0.5
 		local throw = yokeSize * 0.34
 		local yokeHandleSize = 16
-		local yokeHandleX = centerX + clamp(yoke.roll or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
-		local yokeHandleY = centerY + clamp(yoke.pitch or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
+		local yokeHandleX = centerX + clamp(-yoke.roll or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
+		local yokeHandleY = centerY + clamp(-yoke.pitch or 0, -1, 1) * throw - (yokeHandleSize * 0.5)
 
 		love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
 		love.graphics.rectangle("fill", yokeX, yokeY, yokeSize, yokeSize, 4, 4)
@@ -4215,6 +4215,7 @@ local function drawHud(w, h, cx, cy)
 		panelY + panelSize + 4
 	)
 end
+
 function love.draw()
 	triangleCount = 0
 	local centerX, centerY = screen.w / 2, screen.h / 2
