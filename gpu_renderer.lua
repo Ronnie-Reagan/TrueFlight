@@ -3,8 +3,8 @@ local love = require "love"
 local q = require "quat"
 
 local vertexFormat = {
-    { "VertexPosition", "float", 3 },
-    { "VertexColor", "float", 4 }
+    { location = 0, format = "floatvec3" },
+    { location = 2, format = "floatvec4" }
 }
 
 local shaderSource = [[
@@ -196,6 +196,15 @@ function renderer.resize(screen)
         return
     end
     state.aspect = screen.w / screen.h
+end
+
+function renderer.setClipPlanes(nearPlane, farPlane)
+    local nearValue = tonumber(nearPlane) or state.nearPlane or 0.1
+    local farValue = tonumber(farPlane) or state.farPlane or 5000.0
+    nearValue = math.max(0.001, nearValue)
+    farValue = math.max(nearValue + 0.1, farValue)
+    state.nearPlane = nearValue
+    state.farPlane = farValue
 end
 
 function renderer.drawWorld(objects, camera, backgroundColor)
