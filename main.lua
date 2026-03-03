@@ -18,6 +18,16 @@ local objects = {}
 local cubeModel = objectDefs.cubeModel
 local cloudPuffModel = objectDefs.cloudPuffModel or cubeModel
 local playerModel = cubeModel
+defaultPlayerModelPath = "objects/Dualengine.stl"
+normalizedPlayerModelExtent = 2.2
+defaultPlayerModelScale = 1.35
+defaultWalkingModelScale = 1.0
+playerPlaneModelScale = defaultPlayerModelScale
+playerPlaneModelHash = "builtin-cube"
+playerWalkingModelScale = defaultWalkingModelScale
+playerWalkingModelHash = "builtin-cube"
+playerModelScale = playerWalkingModelScale
+playerModelHash = playerWalkingModelHash
 local screen, camera, groundObject, triangleCount, frameImage, renderMode, gpuErrorLogged --, zBuffer
 local useGpuRenderer = true
 local perfElapsed, perfFrames, perfLoggedLowFps = 0, 0, false
@@ -49,7 +59,7 @@ local thirdPersonState = {
 	camera = nil
 }
 local mapState = {
-	visible = false,
+	visible = true,
 	mHeld = false,
 	mUsedForZoom = false,
 	zoomIndex = 2,
@@ -60,6 +70,23 @@ local mapState = {
 	gridImageSize = 0
 }
 local localPlayerObject = nil
+localGroundClearance = 1.8
+modelLoadPrompt = {
+	active = false,
+	text = "",
+	cursor = 0
+}
+modelLoadTargetRole = "plane"
+playerModelCache = {}
+modelTransferState = {
+	requestCooldown = 1.4,
+	chunkSize = 720,
+	maxChunksPerTick = 3,
+	transferTimeout = 15.0,
+	requestedAt = {},
+	outgoing = {},
+	incoming = {}
+}
 local worldHalfExtent = 1000
 local defaultGroundParams = {
 	seed = math.random(0, 999999),
@@ -162,6 +189,10 @@ local pauseMenu = {
 		{ id = "renderer", label = "Renderer", kind = "toggle", help = "Switch between GPU and CPU renderer paths." },
 		{ id = "crosshair", label = "Crosshair", kind = "toggle", help = "Show or hide center crosshair dot." },
 		{ id = "overlay", label = "Debug Overlay", kind = "toggle", help = "Toggle top-left help/perf text." },
+		{ id = "load_custom_stl", label = "Load Plane STL", kind = "action", help = "Open a path prompt and load any STL from disk (or drop a file on the window)." },
+		{ id = "model_scale", label = "Plane Scale", kind = "range", min = 0.5, max = 3.0, step = 0.05, help = "Scale normalized plane models for all clients." },
+		{ id = "load_walking_stl", label = "Load Walking STL", kind = "action", help = "Load a separate STL used only when not in flight mode." },
+		{ id = "walking_model_scale", label = "Walking Scale", kind = "range", min = 0.3, max = 3.0, step = 0.05, help = "Scale used for walking-mode player model." },
 		{ id = "speed", label = "Move Speed", kind = "range", min = 2, max = 30, step = 1, help = "Adjust player movement speed." },
 		{ id = "fov", label = "Field of View", kind = "range", min = 60, max = 120, step = 5, help = "Adjust camera FOV in degrees." },
 		{ id = "sensitivity", label = "Mouse Sensitivity", kind = "range", min = 0.0004, max = 0.004, step = 0.0002, help = "Adjust mouse look sensitivity." },
@@ -878,27 +909,273 @@ local function syncLocalPlayerObject()
 	if not localPlayerObject or not camera then
 		return
 	end
+	localPlayerObject.basePos = localPlayerObject.basePos or { 0, 0, 0 }
+	localPlayerObject.basePos[1] = camera.pos[1]
+	localPlayerObject.basePos[2] = camera.pos[2]
+	localPlayerObject.basePos[3] = camera.pos[3]
 	localPlayerObject.pos[1] = camera.pos[1]
-	localPlayerObject.pos[2] = camera.pos[2]
+	localPlayerObject.pos[2] = camera.pos[2] + (localPlayerObject.visualOffsetY or 0)
 	localPlayerObject.pos[3] = camera.pos[3]
 	localPlayerObject.rot = composePlayerModelRotation(camera.rot)
 end
 
-local function loadPlayerModelFromStl(path)
-	local stlModel, loadErr = engine.loadSTL(path)
-	if not stlModel then
-		logger.log("Player STL load failed, using cube fallback: " .. tostring(loadErr))
-		playerModel = cubeModel
+function bytesToHex(raw)
+	local out = {}
+	for i = 1, #raw do
+		out[i] = string.format("%02x", raw:byte(i))
+	end
+	return table.concat(out)
+end
+
+function fallbackHash(raw)
+	local bitOps = _G.bit or _G.bit32
+	if not bitOps or type(raw) ~= "string" then
+		return string.format("len%08x", #raw)
+	end
+
+	local hash = 2166136261
+	for i = 1, #raw do
+		hash = bitOps.bxor(hash, raw:byte(i))
+		hash = (hash * 16777619) % 4294967296
+	end
+	if hash < 0 then
+		hash = hash + 4294967296
+	end
+	return string.format("fnv%08x", hash)
+end
+
+function hashModelBytes(raw)
+	if love.data and love.data.hash then
+		local ok, digest = pcall(function()
+			return love.data.hash("sha256", raw)
+		end)
+		if ok and type(digest) == "string" then
+			return bytesToHex(digest)
+		end
+	end
+	return fallbackHash(raw)
+end
+
+function encodeModelBytes(raw)
+	if love.data and love.data.encode then
+		local ok, out = pcall(function()
+			return love.data.encode("string", "base64", raw)
+		end)
+		if ok and type(out) == "string" then
+			return out
+		end
+	end
+	return nil
+end
+
+function decodeModelBytes(encoded)
+	if love.data and love.data.decode then
+		local ok, out = pcall(function()
+			return love.data.decode("string", "base64", encoded)
+		end)
+		if ok and type(out) == "string" then
+			return out
+		end
+	end
+	return nil
+end
+
+function readFileBytes(path)
+	if type(path) ~= "string" or path == "" then
+		return nil, "missing path"
+	end
+
+	local raw, readErr = love.filesystem.read(path)
+	if raw then
+		return raw
+	end
+
+	local handle = io.open(path, "rb")
+	if not handle then
+		return nil, tostring(readErr or "file open failed")
+	end
+	local bytes = handle:read("*a")
+	handle:close()
+	if not bytes or bytes == "" then
+		return nil, "empty file"
+	end
+	return bytes
+end
+
+function computeModelBounds(model)
+	if not model or not model.vertices or #model.vertices == 0 then
+		return { minY = -1, maxY = 1, bottomDistance = 1, topDistance = 1 }
+	end
+
+	local minY, maxY = math.huge, -math.huge
+	for _, vertex in ipairs(model.vertices) do
+		local vy = tonumber(vertex[2]) or 0
+		if vy < minY then
+			minY = vy
+		end
+		if vy > maxY then
+			maxY = vy
+		end
+	end
+	if minY > maxY then
+		minY, maxY = -1, 1
+	end
+
+	return {
+		minY = minY,
+		maxY = maxY,
+		bottomDistance = math.max(0.01, -minY),
+		topDistance = math.max(0.01, maxY)
+	}
+end
+
+function getGroundClearance()
+	if camera and camera.box and camera.box.halfSize then
+		return camera.box.halfSize.y or localGroundClearance
+	end
+	return localGroundClearance
+end
+
+function computeModelVisualOffsetY(modelHash, scale)
+	local entry = playerModelCache[modelHash]
+	local bounds = entry and entry.bounds
+	local bottomDistance = ((bounds and bounds.bottomDistance) or 1) * math.max(0.01, scale or 1)
+	return bottomDistance - getGroundClearance()
+end
+
+function applyPlaneVisualToObject(obj, modelHash, scale)
+	if not obj then
 		return
 	end
 
-	playerModel = engine.normalizeModel(stlModel, 2.2)
+	local entry = playerModelCache[modelHash]
+	obj.model = (entry and entry.model) or cubeModel
+	local s = math.max(0.05, tonumber(scale) or 1)
+	obj.scale = { s, s, s }
+	obj.halfSize = { x = s, y = s, z = s }
+	obj.modelHash = modelHash
+	obj.visualOffsetY = computeModelVisualOffsetY(modelHash, s)
+	if obj.basePos then
+		obj.pos = {
+			obj.basePos[1],
+			obj.basePos[2] + obj.visualOffsetY,
+			obj.basePos[3]
+		}
+	end
+end
+
+function refreshAllPeerModels()
+	for _, peer in pairs(peers) do
+		if peer then
+			local peerScale = (peer.scale and peer.scale[1]) or defaultPlayerModelScale
+			applyPlaneVisualToObject(peer, peer.modelHash, peerScale)
+		end
+	end
+end
+
+function cacheModelEntry(raw, sourceLabel)
+	if type(raw) ~= "string" or raw == "" then
+		return nil, "empty STL data"
+	end
+
+	local stlModel, loadErr = engine.loadSTLData(raw)
+	if not stlModel then
+		return nil, loadErr
+	end
+	local normalized = engine.normalizeModel(stlModel, normalizedPlayerModelExtent)
+	local hash = hashModelBytes(raw)
+	local encoded = encodeModelBytes(raw)
+	local chunkSize = modelTransferState.chunkSize
+	local chunks = {}
+	if encoded and encoded ~= "" then
+		for i = 1, #encoded, chunkSize do
+			chunks[#chunks + 1] = encoded:sub(i, i + chunkSize - 1)
+		end
+	end
+
+	local entry = {
+		hash = hash,
+		source = sourceLabel or "local",
+		raw = raw,
+		model = normalized,
+		bounds = computeModelBounds(normalized),
+		encoded = encoded,
+		encodedLength = encoded and #encoded or 0,
+		byteLength = #raw,
+		chunkSize = chunkSize,
+		chunks = chunks,
+		chunkCount = #chunks
+	}
+	playerModelCache[hash] = entry
+	return entry
+end
+
+function setActivePlayerModel(entry, sourceLabel, targetRole)
+	if not entry then
+		return
+	end
+
+	local role = (targetRole == "walking") and "walking" or "plane"
+	if role == "walking" then
+		playerWalkingModelHash = entry.hash
+	else
+		playerPlaneModelHash = entry.hash
+	end
+
+	if role == getActiveModelRole() then
+		syncActivePlayerModelState()
+	end
+	refreshAllPeerModels()
+
 	logger.log(string.format(
-		"Loaded player STL '%s' (%d verts, %d faces).",
-		path,
-		#(playerModel.vertices or {}),
-		#(playerModel.faces or {})
+		"Loaded %s STL '%s' [%s] (%d verts, %d faces).",
+		role,
+		sourceLabel or entry.source or "unknown",
+		entry.hash,
+		#(entry.model.vertices or {}),
+		#(entry.model.faces or {})
 	))
+end
+
+function loadPlayerModelFromRaw(raw, sourceLabel, targetRole)
+	local entry, err = cacheModelEntry(raw, sourceLabel)
+	if not entry then
+		return false, err
+	end
+	setActivePlayerModel(entry, sourceLabel, targetRole)
+	return true, entry
+end
+
+function loadPlayerModelFromStl(path, targetRole)
+	local raw, readErr = readFileBytes(path)
+	if not raw then
+		logger.log("Player STL load failed, using fallback: " .. tostring(readErr))
+		return false, tostring(readErr)
+	end
+
+	local ok, entryOrErr = loadPlayerModelFromRaw(raw, path, targetRole)
+	if not ok then
+		logger.log("Player STL parse failed, using fallback: " .. tostring(entryOrErr))
+		return false, tostring(entryOrErr)
+	end
+	return true, entryOrErr
+end
+
+do
+	local fallbackEntry = {
+		hash = "builtin-cube",
+		source = "builtin cube",
+		raw = nil,
+		model = cubeModel,
+		bounds = computeModelBounds(cubeModel),
+		encoded = nil,
+		encodedLength = 0,
+		byteLength = 0,
+		chunkSize = modelTransferState.chunkSize,
+		chunks = {},
+		chunkCount = 0
+	}
+	playerModelCache[fallbackEntry.hash] = fallbackEntry
 end
 
 local function pickNextWindTarget()
@@ -1078,6 +1355,29 @@ local function setMouseCapture(enabled)
 	relative = enabled
 end
 
+function getActiveModelRole()
+	return flightSimMode and "plane" or "walking"
+end
+
+function getConfiguredModelForRole(role)
+	if role == "walking" then
+		return playerWalkingModelHash or "builtin-cube", playerWalkingModelScale or defaultWalkingModelScale
+	end
+	return playerPlaneModelHash or "builtin-cube", playerPlaneModelScale or defaultPlayerModelScale
+end
+
+function syncActivePlayerModelState()
+	local modelHash, modelScale = getConfiguredModelForRole(getActiveModelRole())
+	playerModelHash = modelHash
+	playerModelScale = modelScale
+	local entry = playerModelCache and playerModelCache[playerModelHash]
+	playerModel = (entry and entry.model) or cubeModel
+	if localPlayerObject then
+		applyPlaneVisualToObject(localPlayerObject, playerModelHash, playerModelScale)
+		syncLocalPlayerObject()
+	end
+end
+
 local function setFlightMode(enabled)
 	flightSimMode = enabled and true or false
 	if camera then
@@ -1100,6 +1400,7 @@ local function setFlightMode(enabled)
 			syncWalkingLookFromRotation()
 		end
 	end
+	syncActivePlayerModelState()
 end
 
 local function cycleViewMode()
@@ -1162,6 +1463,9 @@ local function clearPeerObjects()
 		end
 	end
 	peers = {}
+	modelTransferState.incoming = {}
+	modelTransferState.outgoing = {}
+	modelTransferState.requestedAt = {}
 end
 
 local function splitPacketFields(data)
@@ -1209,6 +1513,271 @@ local function relayIsConnected()
 		return relayServer:state()
 	end)
 	return ok and state == "connected"
+end
+
+function queueModelTransfer(hash)
+	local entry = playerModelCache[hash]
+	if not entry or not entry.encoded or entry.chunkCount <= 0 then
+		return false
+	end
+	if modelTransferState.outgoing[hash] then
+		return true
+	end
+	modelTransferState.outgoing[hash] = {
+		hash = hash,
+		entry = entry,
+		metaSent = false,
+		nextChunk = 1,
+		lastTouched = love.timer.getTime()
+	}
+	return true
+end
+
+function requestModelFromPeers(hash, reason)
+	if type(hash) ~= "string" or hash == "" then
+		return false
+	end
+	if playerModelCache[hash] then
+		return false
+	end
+	if not relayIsConnected() then
+		return false
+	end
+
+	local now = love.timer.getTime()
+	local lastRequested = modelTransferState.requestedAt[hash] or -math.huge
+	if (now - lastRequested) < modelTransferState.requestCooldown then
+		return false
+	end
+
+	local packet = string.format("MODEL_REQUEST|%s|%s", hash, formatNetFloat(now))
+	local ok = pcall(function()
+		relayServer:send(packet)
+	end)
+	if ok then
+		modelTransferState.requestedAt[hash] = now
+		if reason and reason ~= "" then
+			logger.log("Requested model " .. hash .. " (" .. reason .. ").")
+		end
+	end
+	return ok
+end
+
+function updatePeerVisualModel(peerId)
+	local peer = peerId and peers[peerId]
+	if not peer then
+		return
+	end
+
+	local wantedHash = peer.modelHash or "builtin-cube"
+	local peerScale = (peer.scale and peer.scale[1]) or defaultPlayerModelScale
+	if playerModelCache[wantedHash] then
+		applyPlaneVisualToObject(peer, wantedHash, peerScale)
+		peer.modelHash = wantedHash
+	else
+		applyPlaneVisualToObject(peer, "builtin-cube", peerScale)
+		peer.modelHash = wantedHash
+		requestModelFromPeers(wantedHash, "missing for peer " .. tostring(peerId))
+	end
+end
+
+function handleModelRequestPacket(data)
+	local parts = splitPacketFields(data)
+	if parts[1] ~= "MODEL_REQUEST" then
+		return false
+	end
+
+	local requestedHash = parts[2]
+	if type(requestedHash) ~= "string" or requestedHash == "" then
+		return false
+	end
+
+	return queueModelTransfer(requestedHash)
+end
+
+function handleModelMetaPacket(data)
+	local parts = splitPacketFields(data)
+	if parts[1] ~= "MODEL_META" then
+		return false
+	end
+	if #parts < 7 then
+		return false
+	end
+
+	local hash = parts[2]
+	local byteLength = math.max(0, math.floor(tonumber(parts[3]) or -1))
+	local encodedLength = math.max(0, math.floor(tonumber(parts[4]) or -1))
+	local chunkSize = math.max(1, math.floor(tonumber(parts[5]) or -1))
+	local chunkCount = math.max(0, math.floor(tonumber(parts[6]) or -1))
+	local senderId = tonumber(parts[#parts])
+	if not hash or hash == "" or byteLength <= 0 or encodedLength <= 0 or chunkCount <= 0 then
+		return false
+	end
+	if chunkSize > 4096 or chunkCount > 20000 then
+		return false
+	end
+	if playerModelCache[hash] then
+		return true
+	end
+
+	modelTransferState.incoming[hash] = {
+		hash = hash,
+		byteLength = byteLength,
+		encodedLength = encodedLength,
+		chunkSize = chunkSize,
+		chunkCount = chunkCount,
+		senderId = senderId,
+		chunks = {},
+		receivedCount = 0,
+		lastTouched = love.timer.getTime()
+	}
+	return true
+end
+
+function finalizeIncomingModelTransfer(hash, transfer)
+	if not transfer then
+		return false
+	end
+
+	local ordered = {}
+	for i = 1, transfer.chunkCount do
+		local chunk = transfer.chunks[i]
+		if type(chunk) ~= "string" then
+			return false
+		end
+		ordered[i] = chunk
+	end
+
+	local encoded = table.concat(ordered)
+	if #encoded ~= transfer.encodedLength then
+		return false
+	end
+	local raw = decodeModelBytes(encoded)
+	if not raw or #raw ~= transfer.byteLength then
+		return false
+	end
+
+	local digest = hashModelBytes(raw)
+	if digest ~= hash then
+		return false
+	end
+
+	local entry, err = cacheModelEntry(raw, "peer " .. tostring(transfer.senderId or "?"))
+	if not entry or entry.hash ~= hash then
+		logger.log("Remote model cache failed for " .. tostring(hash) .. ": " .. tostring(err))
+		return false
+	end
+
+	for peerId, peer in pairs(peers) do
+		if peer and peer.modelHash == hash then
+			updatePeerVisualModel(peerId)
+		end
+	end
+	logger.log("Cached remote STL " .. hash .. " (" .. tostring(transfer.byteLength) .. " bytes).")
+	return true
+end
+
+function handleModelChunkPacket(data)
+	local parts = splitPacketFields(data)
+	if parts[1] ~= "MODEL_CHUNK" then
+		return false
+	end
+	if #parts < 5 then
+		return false
+	end
+
+	local hash = parts[2]
+	local chunkIndex = math.floor(tonumber(parts[3]) or -1)
+	local chunkData = parts[4] or ""
+	local senderId = tonumber(parts[#parts])
+
+	local transfer = modelTransferState.incoming[hash]
+	if not transfer then
+		requestModelFromPeers(hash, "chunk without metadata")
+		return false
+	end
+	if transfer.senderId and senderId and transfer.senderId ~= senderId then
+		return false
+	end
+	if chunkIndex < 1 or chunkIndex > transfer.chunkCount then
+		return false
+	end
+	if #chunkData > transfer.chunkSize then
+		return false
+	end
+
+	if not transfer.chunks[chunkIndex] then
+		transfer.chunks[chunkIndex] = chunkData
+		transfer.receivedCount = transfer.receivedCount + 1
+	end
+	transfer.lastTouched = love.timer.getTime()
+
+	if transfer.receivedCount >= transfer.chunkCount then
+		modelTransferState.incoming[hash] = nil
+		if not finalizeIncomingModelTransfer(hash, transfer) then
+			requestModelFromPeers(hash, "validation retry")
+		end
+	end
+	return true
+end
+
+function pumpModelTransfers(now)
+	local connected = relayIsConnected()
+	if connected then
+		for _, transfer in pairs(modelTransferState.outgoing) do
+			if transfer and (not transfer.metaSent) then
+				local entry = transfer.entry
+				local packet = table.concat({
+					"MODEL_META",
+					entry.hash,
+					tostring(entry.byteLength),
+					tostring(entry.encodedLength),
+					tostring(entry.chunkSize),
+					tostring(entry.chunkCount)
+				}, "|")
+				pcall(function()
+					relayServer:send(packet)
+				end)
+				transfer.metaSent = true
+			end
+		end
+
+		local chunkBudget = modelTransferState.maxChunksPerTick
+		for hash, transfer in pairs(modelTransferState.outgoing) do
+			if chunkBudget <= 0 then
+				break
+			end
+			local entry = transfer and transfer.entry
+			if not transfer or not entry then
+				modelTransferState.outgoing[hash] = nil
+			else
+				while chunkBudget > 0 and transfer.nextChunk <= entry.chunkCount do
+					local chunkPayload = entry.chunks[transfer.nextChunk]
+					if not chunkPayload then
+						break
+					end
+					local packet = string.format("MODEL_CHUNK|%s|%d|%s", entry.hash, transfer.nextChunk, chunkPayload)
+					pcall(function()
+						relayServer:send(packet)
+					end)
+					transfer.nextChunk = transfer.nextChunk + 1
+					transfer.lastTouched = now
+					chunkBudget = chunkBudget - 1
+				end
+
+				if transfer.nextChunk > entry.chunkCount then
+					modelTransferState.outgoing[hash] = nil
+				end
+			end
+		end
+	end
+
+	for hash, transfer in pairs(modelTransferState.incoming) do
+		if (now - (transfer.lastTouched or now)) > modelTransferState.transferTimeout then
+			modelTransferState.incoming[hash] = nil
+			requestModelFromPeers(hash, "timed out")
+		end
+	end
 end
 
 local function setCloudRole(role, detail)
@@ -1901,7 +2470,9 @@ local function buildPauseMenuLayout()
 	local contentW = panelW - 36
 	local footerTextW = contentW
 	local controlsText
-	if isGameTab then
+	if modelLoadPrompt.active then
+		controlsText = "Model path entry active: type full path and press Enter, or Esc to cancel."
+	elseif isGameTab then
 		controlsText = "Tab/H for Help/Controls | Up/Down select | Enter apply | Esc resume"
 	elseif isControlsTab then
 		if pauseMenu.listeningBinding then
@@ -2104,6 +2675,18 @@ local function getPauseItemValue(item)
 	if item.id == "overlay" then
 		return showDebugOverlay and "On" or "Off"
 	end
+	if item.id == "load_custom_stl" then
+		return "Open..."
+	end
+	if item.id == "load_walking_stl" then
+		return "Open..."
+	end
+	if item.id == "model_scale" then
+		return string.format("%.2fx", playerPlaneModelScale)
+	end
+	if item.id == "walking_model_scale" then
+		return string.format("%.2fx", playerWalkingModelScale)
+	end
 	if item.id == "speed" and camera then
 		return string.format("%.1f", camera.speed)
 	end
@@ -2136,6 +2719,26 @@ local function adjustPauseItem(item, direction, multiplier)
 	if item.id == "speed" and camera then
 		camera.speed = clamp(camera.speed + item.step * direction * scale, item.min, item.max)
 		setPauseStatus("Move Speed: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "model_scale" then
+		playerPlaneModelScale = clamp(playerPlaneModelScale + item.step * direction * scale, item.min, item.max)
+		playerPlaneModelScale = math.floor(playerPlaneModelScale * 100 + 0.5) / 100
+		if getActiveModelRole() == "plane" then
+			syncActivePlayerModelState()
+		end
+		setPauseStatus("Plane Scale: " .. getPauseItemValue(item), 1.2)
+		return
+	end
+
+	if item.id == "walking_model_scale" then
+		playerWalkingModelScale = clamp(playerWalkingModelScale + item.step * direction * scale, item.min, item.max)
+		playerWalkingModelScale = math.floor(playerWalkingModelScale * 100 + 0.5) / 100
+		if getActiveModelRole() == "walking" then
+			syncActivePlayerModelState()
+		end
+		setPauseStatus("Walking Scale: " .. getPauseItemValue(item), 1.2)
 		return
 	end
 
@@ -2174,6 +2777,18 @@ local function activatePauseItem(item)
 	elseif item.id == "flight" then
 		setFlightMode(not flightSimMode)
 		setPauseStatus("Flight Mode: " .. getPauseItemValue(item), 1.2)
+	elseif item.id == "load_custom_stl" then
+		modelLoadTargetRole = "plane"
+		modelLoadPrompt.active = true
+		modelLoadPrompt.text = ""
+		modelLoadPrompt.cursor = 0
+		setPauseStatus("Plane STL path: Enter to load, Esc to cancel.", 4.5)
+	elseif item.id == "load_walking_stl" then
+		modelLoadTargetRole = "walking"
+		modelLoadPrompt.active = true
+		modelLoadPrompt.text = ""
+		modelLoadPrompt.cursor = 0
+		setPauseStatus("Walking STL path: Enter to load, Esc to cancel.", 4.5)
 	elseif item.id == "renderer" then
 		setRendererPreference(not useGpuRenderer)
 		setPauseStatus("Renderer: " .. getPauseItemValue(item), 1.2)
@@ -2413,6 +3028,8 @@ setPauseState = function(paused)
 		resetAltLookState()
 		mapState.mHeld = false
 		mapState.mUsedForZoom = false
+		modelLoadPrompt.active = false
+		modelLoadTargetRole = "plane"
 		pauseMenu.tab = "game"
 		pauseMenu.helpScroll = 0
 		pauseMenu.controlsScroll = 0
@@ -2430,6 +3047,8 @@ setPauseState = function(paused)
 		setMouseCapture(false)
 		logger.log("Pause menu opened.")
 	else
+		modelLoadPrompt.active = false
+		modelLoadTargetRole = "plane"
 		pauseMenu.tabBounds = {}
 		pauseMenu.itemBounds = {}
 		pauseMenu.controlsRowBounds = {}
@@ -2847,6 +3466,33 @@ local function drawPauseMenuFooter(layout)
 	end
 end
 
+function drawModelLoadPrompt(layout)
+	if not modelLoadPrompt.active then
+		return
+	end
+
+	local promptX = layout.panelX + 24
+	local promptW = layout.panelW - 48
+	local promptH = math.max(54, layout.lineH * 2 + 16)
+	local promptY = layout.panelY + layout.panelH - promptH - 12
+	local targetLabel = (modelLoadTargetRole == "walking") and "Walking STL" or "Plane STL"
+	local prefix = targetLabel .. ": "
+	local left = modelLoadPrompt.text:sub(1, modelLoadPrompt.cursor)
+	local cursorX = promptX + 10 + love.graphics.getFont():getWidth(prefix .. left)
+	cursorX = clamp(cursorX, promptX + 10, promptX + promptW - 10)
+
+	love.graphics.setColor(0.03, 0.04, 0.05, 0.96)
+	love.graphics.rectangle("fill", promptX, promptY, promptW, promptH, 6, 6)
+	love.graphics.setColor(0.78, 0.87, 1.0, 0.9)
+	love.graphics.rectangle("line", promptX, promptY, promptW, promptH, 6, 6)
+	love.graphics.setColor(1, 1, 1, 0.95)
+	love.graphics.print(prefix .. modelLoadPrompt.text, promptX + 10, promptY + 8)
+	love.graphics.setColor(0.7, 0.9, 1.0, 0.95)
+	love.graphics.line(cursorX, promptY + 8, cursorX, promptY + 8 + love.graphics.getFont():getHeight())
+	love.graphics.setColor(0.85, 0.9, 0.95, 0.9)
+	love.graphics.print("Enter=Load  Esc=Cancel  Drag/drop STL also works", promptX + 10, promptY + promptH - (layout.lineH + 6))
+end
+
 local function drawPauseMenu()
 	local oldFont = love.graphics.getFont()
 	local titleFont = pauseTitleFont or oldFont
@@ -2877,6 +3523,7 @@ local function drawPauseMenu()
 		drawPauseHelpContent(layout)
 	end
 	drawPauseMenuFooter(layout)
+	drawModelLoadPrompt(layout)
 
 	love.graphics.setFont(oldFont)
 end
@@ -3338,9 +3985,10 @@ function love.load()
 		gravity = -9.81,   -- units/sec^2
 		jumpSpeed = 5,     -- initial jump
 		throttle = 0,
-		maxSpeed = 34,
-		throttleAccel = 18,
-		flightThrustAccel = 32,
+		throttleAccel = 0.55,
+		flightMass = 1.0,
+		flightThrustForce = 36,
+		flightThrustAccel = 36,
 		flightDragCoefficient = 0.018,
 		flightAirBrakeDrag = 0.11,
 		flightLiftCoefficient = 0.11,
@@ -3351,8 +3999,9 @@ function love.load()
 		flightFullLiftSpeed = 24,
 		flightInducedDragCoefficient = 0.0075,
 		flightGravity = -9.81,
-		flightMaxVelocity = 64,
 		flightGroundFriction = 0.94,
+		flightGroundPitchHoldEnabled = true,
+		flightGroundPitchHoldAngle = math.rad(-20),
 		flightVel = { 0, 0, 0 },
 		flightRotVel = { pitch = 0, yaw = 0, roll = 0 },
 		flightRotResponse = 6.0,
@@ -3363,9 +4012,9 @@ function love.load()
 		yokeMouseYawGain = 14,
 		yokeMouseRollGain = 12,
 		afterburnerMultiplier = 1.45,
-		airBrakeStrength = 65,
+		airBrakeStrength = 1.2,
 		flightThrottleDamping = 5,
-		wheelThrottleStep = 2,
+		wheelThrottleStep = 0.06,
 		flightPitchRate = 78,
 		flightYawRate = 62,
 		flightRollRate = 95,
@@ -3384,10 +4033,11 @@ function love.load()
 		}
 	}
 	syncWalkingLookFromRotation()
+	localGroundClearance = (camera.box and camera.box.halfSize and camera.box.halfSize.y) or localGroundClearance
 	viewState.mode = "first_person"
 	viewState.activeCamera = camera
 	resetAltLookState()
-	mapState.visible = false
+	mapState.visible = true
 	mapState.mHeld = false
 	mapState.mUsedForZoom = false
 	mapState.zoomIndex = 2
@@ -3423,19 +4073,31 @@ function love.load()
 	pauseMenu.statusUntil = 0
 	pauseMenu.confirmItemId = nil
 	pauseMenu.confirmUntil = 0
+	modelLoadPrompt.active = false
+	modelLoadPrompt.text = ""
+	modelLoadPrompt.cursor = 0
 
-	loadPlayerModelFromStl("objects/Dualengine.stl")
+	local loadedDefaultModel = loadPlayerModelFromStl(defaultPlayerModelPath, "plane")
+	if not loadedDefaultModel then
+		local fallback = playerModelCache["builtin-cube"]
+		setActivePlayerModel(fallback, "builtin cube", "plane")
+	end
+	syncActivePlayerModelState()
 
 	-- Local avatar is synced to player camera each update; hidden in first-person, shown in third-person.
 	localPlayerObject = {
 		model = playerModel,
 		pos = { camera.pos[1], camera.pos[2], camera.pos[3] },
+		basePos = { camera.pos[1], camera.pos[2], camera.pos[3] },
 		rot = composePlayerModelRotation(camera.rot),
-		scale = { 0.9, 0.9, 0.9 },
+		scale = { playerModelScale, playerModelScale, playerModelScale },
 		color = { 0.9, 0.4, 0.1 },
 		isSolid = false,
-		isLocalPlayer = true
+		isLocalPlayer = true,
+		modelHash = playerModelHash
 	}
+	applyPlaneVisualToObject(localPlayerObject, playerModelHash, playerModelScale)
+	syncLocalPlayerObject()
 
 	objects = {
 		[1] = localPlayerObject
@@ -3588,13 +4250,32 @@ local function adjustFlightThrottleFromWheel(direction)
 		return
 	end
 
-	local maxThrottle = camera.maxSpeed
-	if isActionDown("flight_afterburner") then
-		maxThrottle = maxThrottle * (camera.afterburnerMultiplier or 1.6)
+	local step = camera.wheelThrottleStep or 0.06
+	camera.throttle = clamp((camera.throttle or 0) + (step * direction), 0, 1)
+end
+
+function closeModelLoadPrompt(statusMessage, duration)
+	modelLoadPrompt.active = false
+	modelLoadPrompt.cursor = math.max(0, #modelLoadPrompt.text)
+	if statusMessage then
+		setPauseStatus(statusMessage, duration or 1.8)
+	end
+end
+
+function submitModelLoadPrompt()
+	local path = (modelLoadPrompt.text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if path == "" then
+		closeModelLoadPrompt("Model load cancelled.", 1.2)
+		return
 	end
 
-	local step = camera.wheelThrottleStep or 2
-	camera.throttle = clamp(camera.throttle + (step * direction), 0, maxThrottle)
+	local ok, entryOrErr = loadPlayerModelFromStl(path, modelLoadTargetRole)
+	if ok then
+		queueModelTransfer(entryOrErr.hash)
+		closeModelLoadPrompt("Loaded STL: " .. path, 2.4)
+	else
+		closeModelLoadPrompt("Failed to load STL: " .. tostring(entryOrErr), 2.6)
+	end
 end
 
 local lastProjectileTriggerAt = -999
@@ -3609,6 +4290,9 @@ end
 
 function love.mousemoved(x, y, dx, dy)
 	if pauseMenu.active then
+		if modelLoadPrompt.active then
+			return
+		end
 		if pauseMenu.tab == "controls" and pauseMenu.listeningBinding then
 			captureBindingFromMouseMotion(dx, dy)
 			return
@@ -3639,17 +4323,20 @@ end
 
 local function updateNet()
 	local canSend = relayIsConnected()
+	local now = love.timer.getTime()
 
 	if canSend then
 		local packet = string.format(
-			"STATE|%f|%f|%f|%f|%f|%f|%f",
+			"STATE|%f|%f|%f|%f|%f|%f|%f|%s|%s",
 			camera.pos[1],
 			camera.pos[2],
 			camera.pos[3],
 			camera.rot.w,
 			camera.rot.x,
 			camera.rot.y,
-			camera.rot.z
+			camera.rot.z,
+			formatNetFloat(playerModelScale),
+			playerModelHash or "builtin-cube"
 		)
 		pcall(function()
 			relayServer:send(packet)
@@ -3657,6 +4344,7 @@ local function updateNet()
 
 		sendCloudSnapshot(false)
 	end
+	pumpModelTransfers(now)
 end
 
 local function serviceNetworkEvents()
@@ -3676,9 +4364,11 @@ local function serviceNetworkEvents()
 					peers,
 					objects,
 					q,
-					playerModel,
-					playerModelRotationOffset
+					cubeModel,
+					playerModelRotationOffset,
+					{ scale = defaultPlayerModelScale, modelHash = "builtin-cube" }
 				)
+				updatePeerVisualModel(peerId)
 				notePeerStateReceived(peerId)
 			elseif packetType == "CLOUD_REQUEST" then
 				handleCloudRequestPacket(event.data)
@@ -3688,6 +4378,12 @@ local function serviceNetworkEvents()
 				handleGroundRequestPacket(event.data)
 			elseif packetType == "GROUND_SNAPSHOT" then
 				handleGroundSnapshotPacket(event.data)
+			elseif packetType == "MODEL_REQUEST" then
+				handleModelRequestPacket(event.data)
+			elseif packetType == "MODEL_META" then
+				handleModelMetaPacket(event.data)
+			elseif packetType == "MODEL_CHUNK" then
+				handleModelChunkPacket(event.data)
 			end
 		elseif event.type == "disconnect" and relayServer and event.peer == relayServer then
 			relayServer = nil
@@ -3755,6 +4451,36 @@ end
 -- === Input Management ===
 function love.keypressed(key, scancode, isrepeat)
 	if pauseMenu.active then
+		if modelLoadPrompt.active then
+			if key == "escape" then
+				closeModelLoadPrompt("Model load cancelled.", 1.2)
+			elseif key == "return" or key == "kpenter" then
+				submitModelLoadPrompt()
+			elseif key == "backspace" then
+				if modelLoadPrompt.cursor > 0 then
+					local left = modelLoadPrompt.text:sub(1, modelLoadPrompt.cursor - 1)
+					local right = modelLoadPrompt.text:sub(modelLoadPrompt.cursor + 1)
+					modelLoadPrompt.text = left .. right
+					modelLoadPrompt.cursor = modelLoadPrompt.cursor - 1
+				end
+			elseif key == "delete" then
+				if modelLoadPrompt.cursor < #modelLoadPrompt.text then
+					local left = modelLoadPrompt.text:sub(1, modelLoadPrompt.cursor)
+					local right = modelLoadPrompt.text:sub(modelLoadPrompt.cursor + 2)
+					modelLoadPrompt.text = left .. right
+				end
+			elseif key == "left" then
+				modelLoadPrompt.cursor = math.max(0, modelLoadPrompt.cursor - 1)
+			elseif key == "right" then
+				modelLoadPrompt.cursor = math.min(#modelLoadPrompt.text, modelLoadPrompt.cursor + 1)
+			elseif key == "home" then
+				modelLoadPrompt.cursor = 0
+			elseif key == "end" then
+				modelLoadPrompt.cursor = #modelLoadPrompt.text
+			end
+			return
+		end
+
 		if pauseMenu.tab == "controls" and pauseMenu.listeningBinding then
 			if key == "escape" then
 				cancelControlBindingCapture()
@@ -3922,8 +4648,25 @@ function love.keyreleased(key)
 	end
 end
 
+function love.textinput(text)
+	if not pauseMenu.active or not modelLoadPrompt.active then
+		return
+	end
+	if type(text) ~= "string" or text == "" then
+		return
+	end
+
+	local left = modelLoadPrompt.text:sub(1, modelLoadPrompt.cursor)
+	local right = modelLoadPrompt.text:sub(modelLoadPrompt.cursor + 1)
+	modelLoadPrompt.text = left .. text .. right
+	modelLoadPrompt.cursor = modelLoadPrompt.cursor + #text
+end
+
 function love.mousepressed(x, y, button)
 	if pauseMenu.active then
+		if modelLoadPrompt.active then
+			return
+		end
 		if pauseMenu.tab == "controls" and pauseMenu.listeningBinding then
 			captureBindingFromMouseButton(button)
 			return
@@ -3957,6 +4700,9 @@ function love.wheelmoved(x, y)
 	end
 
 	if pauseMenu.active then
+		if modelLoadPrompt.active then
+			return
+		end
 		if pauseMenu.tab == "controls" and pauseMenu.listeningBinding then
 			captureBindingFromWheel(y)
 			return
@@ -3988,6 +4734,69 @@ function love.wheelmoved(x, y)
 	end
 end
 
+function love.filedropped(file)
+	if not file then
+		return
+	end
+
+	local name = (file.getFilename and file:getFilename()) or "dropped.stl"
+	local lowerName = string.lower(name or "")
+	if not lowerName:match("%.stl$") then
+		if pauseMenu.active then
+			setPauseStatus("Dropped file is not an STL: " .. tostring(name), 2.2)
+		end
+		return
+	end
+
+	local openOk = pcall(function()
+		file:open("r")
+	end)
+	if not openOk then
+		if pauseMenu.active then
+			setPauseStatus("Could not open dropped STL.", 2.2)
+		end
+		return
+	end
+
+	local readOk, raw = pcall(function()
+		return file:read()
+	end)
+	if (not readOk) or (type(raw) ~= "string") or raw == "" then
+		local sizeOk, sizeValue = pcall(function()
+			return file:getSize()
+		end)
+		if sizeOk and tonumber(sizeValue) and tonumber(sizeValue) > 0 then
+			readOk, raw = pcall(function()
+				return file:read(tonumber(sizeValue))
+			end)
+		end
+	end
+	pcall(function()
+		file:close()
+	end)
+
+	if (not readOk) or (type(raw) ~= "string") or raw == "" then
+		if pauseMenu.active then
+			setPauseStatus("Dropped STL could not be read.", 2.2)
+		end
+		return
+	end
+
+	local dropRole = modelLoadPrompt.active and (modelLoadTargetRole or getActiveModelRole()) or getActiveModelRole()
+	local ok, entryOrErr = loadPlayerModelFromRaw(raw, name, dropRole)
+	if ok then
+		queueModelTransfer(entryOrErr.hash)
+		modelLoadPrompt.active = false
+		if pauseMenu.active then
+			setPauseStatus("Loaded dropped STL: " .. tostring(name), 2.4)
+		end
+	else
+		if pauseMenu.active then
+			setPauseStatus("Dropped STL failed: " .. tostring(entryOrErr), 2.6)
+		end
+	end
+end
+
 function love.mousefocus(focused)
 	if not focused then
 		setMouseCapture(false)
@@ -4003,11 +4812,6 @@ end
 
 local function drawHud(w, h, cx, cy)
 	if flightSimMode and camera then
-		local currentMaxThrottle = math.max(0.001, camera.maxSpeed or 1)
-		if isActionDown("flight_afterburner") then
-			currentMaxThrottle = currentMaxThrottle * (camera.afterburnerMultiplier or 1.6)
-		end
-
 		local wind = getWindVector3()
 		local v = camera.flightVel or camera.vel or { 0, 0, 0 }
 		local airVel = {
@@ -4016,37 +4820,36 @@ local function drawHud(w, h, cx, cy)
 			(v[3] or 0) - (wind[3] or 0)
 		}
 		local airSpeed = math.sqrt(airVel[1] * airVel[1] + airVel[2] * airVel[2] + airVel[3] * airVel[3])
-		local airSpeedRatio = clamp(airSpeed / currentMaxThrottle, 0, 1)
+		local iasReference = math.max(1.0, camera.flightFullLiftSpeed or 24)
+		local airSpeedRatio = clamp(airSpeed / iasReference, 0, 1)
 		local airSpeedMph = airSpeed * 2.236936
 		local airSpeedKph = airSpeed * 3.6
-
-		local throttleRatio = clamp((camera.throttle or 0) / currentMaxThrottle, 0, 1)
+		local throttleRatio = clamp(camera.throttle or 0, 0, 1)
+		local throttlePct = math.floor((throttleRatio * 100) + 0.5)
+		local thrustNow = throttleRatio * (camera.flightThrustForce or camera.flightThrustAccel or 0)
+		if isActionDown("flight_afterburner") then
+			thrustNow = thrustNow * (camera.afterburnerMultiplier or 1.45)
+		end
 		local barHeight = math.floor(math.min(h * 0.34, 240))
 		local barWidth = 18
-		local barX = 24
+		local throttleX = 20
 		local barY = math.floor((h - barHeight) * 0.5)
+		local digitalW = 96
+		local digitalH = 84
+
+		love.graphics.setColor(0.04, 0.06, 0.08, 0.84)
+		love.graphics.rectangle("fill", throttleX, barY, digitalW, digitalH, 5, 5)
+		love.graphics.setColor(0.78, 0.87, 0.95, 0.92)
+		love.graphics.rectangle("line", throttleX, barY, digitalW, digitalH, 5, 5)
+		love.graphics.setColor(0.86, 0.92, 1.0, 0.96)
+		love.graphics.print("THROTTLE", throttleX + 9, barY + 8)
+		love.graphics.setColor(0.26, 0.95, 0.54, 0.98)
+		love.graphics.print(string.format("%03d%%", throttlePct), throttleX + 14, barY + 28)
+		love.graphics.setColor(0.8, 0.9, 0.98, 0.92)
+		love.graphics.print(string.format("Thrust %.1f", thrustNow), throttleX + 9, barY + 56)
+
+		local iasX = throttleX + digitalW + 18
 		local handleSize = barWidth + 8
-		local handleY = barY + (1 - throttleRatio) * barHeight - (handleSize * 0.5)
-		handleY = clamp(handleY, barY - (handleSize * 0.5), barY + barHeight - (handleSize * 0.5))
-
-		love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
-		love.graphics.rectangle("fill", barX, barY, barWidth, barHeight, 3, 3)
-		love.graphics.setColor(0.75, 0.85, 0.92, 0.9)
-		love.graphics.rectangle("line", barX, barY, barWidth, barHeight, 3, 3)
-
-		local fillTop = barY + (1 - throttleRatio) * barHeight
-		love.graphics.setColor(0.22, 0.82, 0.36, 0.65)
-		love.graphics.rectangle("fill", barX + 1, fillTop, barWidth - 2, (barY + barHeight) - fillTop)
-
-		love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
-		love.graphics.rectangle("fill", barX - 4, handleY, handleSize, handleSize, 2, 2)
-		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
-		love.graphics.rectangle("line", barX - 4, handleY, handleSize, handleSize, 2, 2)
-
-		love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
-		love.graphics.print(string.format("THR %d%%", math.floor((throttleRatio * 100) + 0.5)), barX - 8, barY + barHeight + 6)
-
-		local iasX = barX + barWidth + 28
 		local iasHandleY = barY + (1 - airSpeedRatio) * barHeight - (handleSize * 0.5)
 		iasHandleY = clamp(iasHandleY, barY - (handleSize * 0.5), barY + barHeight - (handleSize * 0.5))
 
@@ -4096,24 +4899,26 @@ local function drawHud(w, h, cx, cy)
 		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
 		love.graphics.rectangle("line", yokeHandleX, yokeHandleY, yokeHandleSize, yokeHandleSize, 2, 2)
 
-		local rudderWidth = 10
-		local rudderX = yokeX + yokeSize + 10
-		local rudderY = yokeY
-		local rudderHandleSize = rudderWidth + 6
+		local rudderWidth = yokeSize
+		local rudderHeight = 10
+		local rudderX = yokeX
+		local rudderY = yokeY + yokeSize + 22
+		local rudderHandleSize = rudderHeight + 8
 		local rudderRatio = (clamp(yoke.yaw or 0, -1, 1) + 1) * 0.5
-		local rudderHandleY = rudderY + (1 - rudderRatio) * yokeSize - (rudderHandleSize * 0.5)
-		rudderHandleY = clamp(rudderHandleY, rudderY - (rudderHandleSize * 0.5), rudderY + yokeSize - (rudderHandleSize * 0.5))
+		local rudderHandleX = rudderX + rudderRatio * rudderWidth - (rudderHandleSize * 0.5)
+		rudderHandleX = clamp(rudderHandleX, rudderX - (rudderHandleSize * 0.5), rudderX + rudderWidth - (rudderHandleSize * 0.5))
 
 		love.graphics.setColor(0.05, 0.07, 0.08, 0.75)
-		love.graphics.rectangle("fill", rudderX, rudderY, rudderWidth, yokeSize, 3, 3)
+		love.graphics.rectangle("fill", rudderX, rudderY, rudderWidth, rudderHeight, 3, 3)
 		love.graphics.setColor(0.75, 0.85, 0.92, 0.9)
-		love.graphics.rectangle("line", rudderX, rudderY, rudderWidth, yokeSize, 3, 3)
+		love.graphics.rectangle("line", rudderX, rudderY, rudderWidth, rudderHeight, 3, 3)
 		love.graphics.setColor(0.95, 0.97, 1.0, 0.95)
-		love.graphics.rectangle("fill", rudderX - 3, rudderHandleY, rudderHandleSize, rudderHandleSize, 2, 2)
+		love.graphics.rectangle("fill", rudderHandleX, rudderY - 4, rudderHandleSize, rudderHandleSize, 2, 2)
 		love.graphics.setColor(0.10, 0.12, 0.15, 0.95)
-		love.graphics.rectangle("line", rudderX - 3, rudderHandleY, rudderHandleSize, rudderHandleSize, 2, 2)
+		love.graphics.rectangle("line", rudderHandleX, rudderY - 4, rudderHandleSize, rudderHandleSize, 2, 2)
 		love.graphics.setColor(0.86, 0.92, 1.0, 0.95)
-		love.graphics.print("YOKE", yokeX + 22, yokeY + yokeSize + 8)
+		love.graphics.print("YOKE", yokeX + 22, yokeY + yokeSize + 6)
+		love.graphics.print("RUDDER", rudderX + 20, rudderY + rudderHeight + 5)
 	end
 
 	if not mapState.visible then
@@ -4365,3 +5170,4 @@ function love.resize(w, h)
 	logger.log(string.format("Window resized to %dx%d", w, h))
 
 end
+

@@ -138,14 +138,7 @@ local function parseBinarySTL(data)
     }
 end
 
--- Loads either ASCII or binary STL.
--- Returns model on success, nil + error message on failure.
-function engine.loadSTL(path)
-    local raw, readErr = love.filesystem.read(path)
-    if not raw then
-        return nil, "failed to read STL: " .. tostring(readErr)
-    end
-
+local function parseStlRaw(raw)
     local triCount = (#raw >= 84) and readU32LE(raw, 81) or nil
     local expectedBytes = triCount and (84 + triCount * 50) or nil
 
@@ -168,6 +161,37 @@ function engine.loadSTL(path)
     end
 
     return nil, parseErr
+end
+
+-- Loads either ASCII or binary STL from raw bytes.
+-- Returns model on success, nil + error message on failure.
+function engine.loadSTLData(raw)
+    if type(raw) ~= "string" or raw == "" then
+        return nil, "invalid STL payload"
+    end
+    return parseStlRaw(raw)
+end
+
+-- Loads either ASCII or binary STL from a virtual or absolute file path.
+-- Returns model on success, nil + error message on failure.
+function engine.loadSTL(path)
+    if type(path) ~= "string" or path == "" then
+        return nil, "missing STL path"
+    end
+
+    local raw, readErr = love.filesystem.read(path)
+    if not raw then
+        local handle = io.open(path, "rb")
+        if handle then
+            raw = handle:read("*a")
+            handle:close()
+        end
+    end
+    if not raw then
+        return nil, "failed to read STL: " .. tostring(readErr)
+    end
+
+    return parseStlRaw(raw)
 end
 
 function engine.normalizeModel(model, targetExtent)
@@ -328,19 +352,11 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
 
     if flightSimMode then
         local throttleAxis = axis(inputState.flightThrottleUp, inputState.flightThrottleDown)
-        local throttleAccel = camera.throttleAccel or 24
-        local maxSpeed = camera.maxSpeed or 50
-        if inputState.flightAfterburner then
-            maxSpeed = maxSpeed * (camera.afterburnerMultiplier or 1.6)
-        end
-
-        camera.throttle = math.max(0, math.min(camera.throttle + throttleAxis * throttleAccel * dt, maxSpeed))
+        local throttleAccel = camera.throttleAccel or 0.55
+        camera.throttle = clamp((camera.throttle or 0) + throttleAxis * throttleAccel * dt, 0, 1)
         if inputState.flightAirBrakes then
-            local brakeStrength = camera.airBrakeStrength or 45
-            camera.throttle = math.max(0, camera.throttle - brakeStrength * dt)
-        elseif throttleAxis == 0 then
-            --local damping = camera.flightThrottleDamping or 4
-            --camera.throttle = math.max(0, camera.throttle - damping * dt)
+            local brakeStrength = camera.airBrakeStrength or 1.2
+            camera.throttle = clamp(camera.throttle - brakeStrength * dt, 0, 1)
         end
 
         local pitchAxis = axis(inputState.flightPitchDown, inputState.flightPitchUp)
@@ -406,9 +422,10 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
             airVel[3] / airSpeed
         } or { 0, 0, 0 }
 
-        local throttleRange = math.max(1e-5, maxSpeed)
-        local throttleRatio = math.max(0, math.min(camera.throttle / throttleRange, 1))
-        local thrustAccel = throttleRatio * (camera.flightThrustAccel or 32)
+        local throttleRatio = clamp(camera.throttle or 0, 0, 1)
+        local afterburnerScale = inputState.flightAfterburner and (camera.afterburnerMultiplier or 1.45) or 1
+        local mass = math.max(0.1, camera.flightMass or 1.0)
+        local thrustForce = throttleRatio * (camera.flightThrustForce or camera.flightThrustAccel or 32) * afterburnerScale
         local dragCoeff = camera.flightDragCoefficient or 0.018
         local airBrakeDrag = (inputState.flightAirBrakes and (camera.flightAirBrakeDrag or 0.11)) or 0
         local forwardAirspeed = math.max(0, vector3.dot(airVel, forward))
@@ -427,6 +444,7 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
         local liftMagnitude = (liftCoeff * dynamicPressure * effectiveAoa + camberLiftCoeff * dynamicPressure) * liftFactor
         local inducedDragMagnitude = (camera.flightInducedDragCoefficient or 0.0035) * math.abs(liftMagnitude)
         local dragMagnitude = (dragCoeff + airBrakeDrag) * airSpeed * airSpeed
+        local gravityAccel = math.abs(camera.flightGravity or camera.gravity or -9.81)
 
         local liftDir = up
         if airSpeed > 1e-5 then
@@ -439,31 +457,22 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
             end
         end
 
-        local accel = {
-            forward[1] * thrustAccel,
-            forward[2] * thrustAccel,
-            forward[3] * thrustAccel
+        local force = {
+            forward[1] * thrustForce + liftDir[1] * liftMagnitude,
+            forward[2] * thrustForce + liftDir[2] * liftMagnitude,
+            forward[3] * thrustForce + liftDir[3] * liftMagnitude
         }
-        accel[1] = accel[1] + liftDir[1] * liftMagnitude
-        accel[2] = accel[2] + liftDir[2] * liftMagnitude + (camera.flightGravity or camera.gravity or -9.81)
-        accel[3] = accel[3] + liftDir[3] * liftMagnitude
         if airSpeed > 1e-5 then
-            accel[1] = accel[1] - airDir[1] * (dragMagnitude + inducedDragMagnitude)
-            accel[2] = accel[2] - airDir[2] * (dragMagnitude + inducedDragMagnitude)
-            accel[3] = accel[3] - airDir[3] * (dragMagnitude + inducedDragMagnitude)
+            local totalDrag = dragMagnitude + inducedDragMagnitude
+            force[1] = force[1] - airDir[1] * totalDrag
+            force[2] = force[2] - airDir[2] * totalDrag
+            force[3] = force[3] - airDir[3] * totalDrag
         end
+        force[2] = force[2] - (mass * gravityAccel)
 
+        local accel = { force[1] / mass, force[2] / mass, force[3] / mass }
         for i = 1, 3 do
             camera.flightVel[i] = camera.flightVel[i] + accel[i] * dt
-        end
-
-        local maxVelocity = camera.flightMaxVelocity or (maxSpeed * 2.1)
-        local speedNow = vector3.length(camera.flightVel)
-        if speedNow > maxVelocity and speedNow > 1e-5 then
-            local scale = maxVelocity / speedNow
-            camera.flightVel[1] = camera.flightVel[1] * scale
-            camera.flightVel[2] = camera.flightVel[2] * scale
-            camera.flightVel[3] = camera.flightVel[3] * scale
         end
 
         for i = 1, 3 do
@@ -503,6 +512,25 @@ function engine.processMovement(camera, dt, flightSimMode, vector3, q, objects, 
             camera.flightVel[1] = camera.flightVel[1] * groundFriction
             camera.flightVel[3] = camera.flightVel[3] * groundFriction
             camera.onGround = true
+
+            if camera.flightGroundPitchHoldEnabled ~= false then
+                local holdPitch = camera.flightGroundPitchHoldAngle or math.rad(4.5)
+                local currentForward = q.rotateVector(camera.rot, { 0, 0, 1 })
+                local yaw = math.atan2(currentForward[1], currentForward[3])
+                local yawQuat = q.fromAxisAngle({ 0, 1, 0 }, yaw)
+                local holdRight = q.rotateVector(yawQuat, { 1, 0, 0 })
+                local pitchQuat = q.fromAxisAngle(holdRight, holdPitch)
+                camera.rot = q.normalize(q.multiply(pitchQuat, yawQuat))
+
+                if camera.flightRotVel then
+                    camera.flightRotVel.pitch = 0
+                    camera.flightRotVel.roll = 0
+                end
+                if camera.yoke then
+                    camera.yoke.pitch = math.max(0, camera.yoke.pitch or 0)
+                    camera.yoke.roll = 0
+                end
+            end
         else
             camera.onGround = false
         end
