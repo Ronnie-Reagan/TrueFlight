@@ -172,12 +172,20 @@ local characterOrientation = {
 sunSettings = {
 	yaw = 20,
 	pitch = 50,
-	intensity = 2.4,
-	ambient = 0.36,
+	intensity = 1.3,
+	ambient = 0.16,
 	colorR = 1.0,
 	colorG = 0.95,
 	colorB = 0.86,
-	showMarker = true,
+	skyR = 0.34,
+	skyG = 0.46,
+	skyB = 0.68,
+	groundR = 0.75,
+	groundG = 0.75,
+	groundB = 0.75,
+	giSpecular = 0.18,
+	giBounce = 0.10,
+	showMarker = false,
 	markerDistance = 1400,
 	markerSize = 180
 }
@@ -275,7 +283,7 @@ local windState = {
 }
 local cloudState = {
 	groups = {},
-	groupCount = 85,
+	groupCount = 200,
 	minAltitude = 1200,
 	maxAltitude = 3750,
 	spawnRadius = 1400,
@@ -284,6 +292,12 @@ local cloudState = {
 	maxGroupSize = 100,
 	minPuffs = 8,
 	maxPuffs = 30
+}
+local drawDistanceChunkingTuning = {
+	cloudSpawnRatio = 0.78,
+	cloudDespawnRatio = 1.06,
+	cloudSpawnMin = 260,
+	cloudDespawnPadding = 120
 }
 local cloudNetState = {
 	role = "standalone", -- standalone, pending, authority, follower
@@ -391,7 +405,19 @@ function applySunSettingsToRenderer()
 		renderer.setLighting({
 			direction = getSunDirection(),
 			color = getSunLightColor(),
-			ambient = math.max(0, tonumber(sunSettings.ambient) or 0.25)
+			ambient = math.max(0, tonumber(sunSettings.ambient) or 0.25),
+			skyColor = {
+				math.max(0, tonumber(sunSettings.skyR) or 0.42),
+				math.max(0, tonumber(sunSettings.skyG) or 0.56),
+				math.max(0, tonumber(sunSettings.skyB) or 0.82)
+			},
+			groundColor = {
+				math.max(0, tonumber(sunSettings.groundR) or 0.18),
+				math.max(0, tonumber(sunSettings.groundG) or 0.15),
+				math.max(0, tonumber(sunSettings.groundB) or 0.11)
+			},
+			specularAmbient = math.max(0, tonumber(sunSettings.giSpecular) or 0.35),
+			bounce = math.max(0, tonumber(sunSettings.giBounce) or 0.24)
 		})
 	end
 end
@@ -576,6 +602,26 @@ end
 
 local function randomRange(minValue, maxValue)
 	return minValue + (maxValue - minValue) * math.random()
+end
+
+local function syncChunkingWithDrawDistance(forceGroundRebuild)
+	local drawDistance = clamp(tonumber(graphicsSettings.drawDistance) or 1800, 300, 5000)
+	local spawnRadius = math.max(
+		drawDistanceChunkingTuning.cloudSpawnMin,
+		drawDistance * drawDistanceChunkingTuning.cloudSpawnRatio
+	)
+	local despawnRadius = math.max(
+		spawnRadius + drawDistanceChunkingTuning.cloudDespawnPadding,
+		drawDistance * drawDistanceChunkingTuning.cloudDespawnRatio
+	)
+	cloudState.spawnRadius = math.floor(spawnRadius + 0.5)
+	cloudState.despawnRadius = math.floor(despawnRadius + 0.5)
+
+	if forceGroundRebuild and type(updateGroundStreaming) == "function" then
+		if updateGroundStreaming(true) then
+			invalidateMapCache()
+		end
+	end
 end
 
 local function sanitizeCallsign(value)
@@ -1417,7 +1463,7 @@ function applyPlaneVisualToObject(obj, modelHash, scale)
 	obj.submeshes = entry and entry.submeshes or nil
 	obj.faceMaterials = entry and entry.faceMaterials or nil
 	obj.modelAssetId = entry and entry.assetId or nil
-	local s = math.max(0.05, tonumber(scale) or 1)
+	local s = scale and tonumber(scale) or 1
 	obj.scale = { s, s, s }
 	obj.halfSize = { x = s, y = s, z = s }
 	obj.modelHash = modelHash
@@ -2537,6 +2583,7 @@ local function applyCloudSnapshotParts(parts, senderId)
 	cloudState.maxGroupSize = math.max(cloudState.minGroupSize, snapshotMaxGroupSize)
 	cloudState.minPuffs = snapshotMinPuffs
 	cloudState.maxPuffs = snapshotMaxPuffs
+	syncChunkingWithDrawDistance(false)
 
 	if snapshotWindAngle then
 		windState.angle = viewMath.wrapAngle(snapshotWindAngle)
@@ -3468,6 +3515,7 @@ function applyRestartSnapshot(snapshot)
 			tonumber(storedCloud.maxGroupSize) or cloudState.maxGroupSize)
 		cloudState.minPuffs = math.max(1, math.floor(tonumber(storedCloud.minPuffs) or cloudState.minPuffs))
 		cloudState.maxPuffs = math.max(cloudState.minPuffs, math.floor(tonumber(storedCloud.maxPuffs) or cloudState.maxPuffs))
+		syncChunkingWithDrawDistance(false)
 
 		local now = love.timer.getTime()
 		cloudSim.spawnCloudField(cloudState, objects, camera, windState, cloudPuffModel, q, cloudState.groupCount, now)
@@ -3487,6 +3535,7 @@ function applyRestartSnapshot(snapshot)
 			end
 		end
 	end
+	syncChunkingWithDrawDistance(false)
 
 	if snapshot.useGpuRenderer ~= nil then
 		pendingRestartRendererPreference = snapshot.useGpuRenderer and true or false
@@ -4167,6 +4216,7 @@ local function adjustPauseItem(item, direction, multiplier)
 		if renderer.setClipPlanes then
 			renderer.setClipPlanes(0.1, graphicsSettings.drawDistance)
 		end
+		syncChunkingWithDrawDistance(true)
 		setPauseStatus("Draw Distance: " .. getPauseItemValue(item), 1.2)
 		return
 	end
@@ -5433,10 +5483,21 @@ function updateGroundStreaming(forceRebuild)
 	local changed, updatedObject = groundSystem.updateGroundStreaming(forceRebuild, {
 		groundObject = groundObject,
 		activeGroundParams = activeGroundParams,
-		camera = camera
+		camera = camera,
+		drawDistance = graphicsSettings and graphicsSettings.drawDistance
 	})
 	if changed and updatedObject then
 		groundObject = updatedObject
+		local halfExtent = math.max(
+			tonumber(updatedObject.halfSize and updatedObject.halfSize.x) or 0,
+			tonumber(updatedObject.halfSize and updatedObject.halfSize.z) or 0
+		)
+		if halfExtent > 0 and math.abs((worldHalfExtent or 0) - halfExtent) > 1e-6 then
+			worldHalfExtent = halfExtent
+			mapState.zoomExtents = { 160, 420, math.max(worldHalfExtent, 420) }
+			mapState.logicalCamera = nil
+			invalidateMapCache()
+		end
 	end
 	return changed
 end
@@ -5447,6 +5508,7 @@ rebuildGroundFromParams = function(params, reason)
 		activeGroundParams = activeGroundParams,
 		groundObject = groundObject,
 		camera = camera,
+		drawDistance = graphicsSettings and graphicsSettings.drawDistance,
 		objects = objects,
 		localPlayerObject = localPlayerObject,
 		mapState = mapState,
@@ -5623,6 +5685,7 @@ function love.load()
 	if renderer.setClipPlanes then
 		renderer.setClipPlanes(0.1, graphicsSettings.drawDistance)
 	end
+	syncChunkingWithDrawDistance(false)
 
 	local loadedDefaultModel = loadPlayerModelFromPath(defaultPlayerModelPath, "plane")
 	if not loadedDefaultModel then
@@ -6530,7 +6593,7 @@ local function projectWorldToScreen(worldPos, viewCamera, w, h)
 	return sx, sy, cam[3]
 end
 
-local function drawWorldPeerIndicators(w, h, viewCamera)
+function drawWorldPeerIndicators(w, h, viewCamera)
 	if not viewCamera then
 		return
 	end
@@ -6571,7 +6634,7 @@ local function drawWorldPeerIndicators(w, h, viewCamera)
 	end
 end
 
-local function drawHud(w, h, cx, cy, renderCamera)
+function drawHud(w, h, cx, cy, renderCamera)
 	local mapPanelX, mapPanelY, mapPanelSize
 
 	if flightSimMode and camera then

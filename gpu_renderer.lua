@@ -72,6 +72,10 @@ uniform float uGlossinessFactor;
 uniform vec3 uLightDir;
 uniform vec3 uLightColor;
 uniform float uAmbientStrength;
+uniform vec3 uSkyColor;
+uniform vec3 uGroundColor;
+uniform float uSpecularAmbientStrength;
+uniform float uBounceStrength;
 
 varying vec3 vWorldPos;
 varying vec3 vWorldNormal;
@@ -174,6 +178,26 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0)
     return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 }
 
+vec3 srgbToLinear(vec3 c)
+{
+    return pow(max(c, vec3(0.0)), vec3(2.2));
+}
+
+vec3 linearToSrgb(vec3 c)
+{
+    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+vec3 toneMapAces(vec3 c)
+{
+    const float a = 2.51;
+    const float b = 0.03;
+    const float d = 0.59;
+    const float e = 0.14;
+    c = max(c, vec3(0.0));
+    return clamp((c * (a * c + b)) / (c * (2.43 * c + d) + e), 0.0, 1.0);
+}
+
 vec2 pickUv(float texCoordSet)
 {
     vec2 uv = (texCoordSet > 0.5) ? vUv1 : vUv0;
@@ -194,13 +218,15 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
         if (uUseDiffuseTex < 0.5) {
             diffuseTex = vec4(1.0);
         }
-        baseColor = diffuseTex * uDiffuseFactor * vec4(uColor, uAlpha) * color;
+        baseColor.rgb = srgbToLinear(diffuseTex.rgb) * uDiffuseFactor.rgb * uColor * color.rgb;
+        baseColor.a = diffuseTex.a * uDiffuseFactor.a * uAlpha * color.a;
     } else {
         vec4 baseTex = Texel(uBaseColorTex, uvBase);
         if (uUseBaseColorTex < 0.5) {
             baseTex = vec4(1.0);
         }
-        baseColor = baseTex * uBaseColorFactor * vec4(uColor, uAlpha) * color;
+        baseColor.rgb = srgbToLinear(baseTex.rgb) * uBaseColorFactor.rgb * uColor * color.rgb;
+        baseColor.a = baseTex.a * uBaseColorFactor.a * uAlpha * color.a;
     }
 
     float alpha = clamp(baseColor.a, 0.0, 1.0);
@@ -208,7 +234,7 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
     if (uUsePaintTex > 0.5) {
         vec2 uvPaint = pickUv(uPaintTexCoord);
         vec4 paint = Texel(uPaintTex, uvPaint);
-        baseColor.rgb = mix(baseColor.rgb, paint.rgb, clamp(paint.a, 0.0, 1.0));
+        baseColor.rgb = mix(baseColor.rgb, srgbToLinear(paint.rgb), clamp(paint.a, 0.0, 1.0));
     }
 
     float metallic = clamp(uMetallicFactor, 0.0, 1.0);
@@ -220,7 +246,7 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
         if (uUseSpecGlossTex < 0.5) {
             sg = vec4(1.0);
         }
-        specularColor = clamp(uSpecularFactor * sg.rgb, 0.0, 1.0);
+        specularColor = clamp(uSpecularFactor * srgbToLinear(sg.rgb), 0.0, 1.0);
         float glossiness = clamp(uGlossinessFactor * sg.a, 0.0, 1.0);
         roughness = clamp(1.0 - glossiness, 0.04, 1.0);
         metallic = 0.0;
@@ -241,7 +267,7 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
     vec3 emissive = uEmissiveFactor;
     if (uUseEmissiveTex > 0.5) {
         vec2 uvEmissive = pickUv(uEmissiveTexCoord);
-        emissive *= Texel(uEmissiveTex, uvEmissive).rgb;
+        emissive *= srgbToLinear(Texel(uEmissiveTex, uvEmissive).rgb);
     }
 
     vec3 N = safeNormalize(vWorldNormal);
@@ -285,10 +311,28 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
     }
 
     vec3 direct = (diffuse + specular) * uLightColor * NdotL;
-    vec3 ambient = baseColor.rgb * (uAmbientStrength * ao);
-    vec3 finalColor = ambient + (direct * ao) + emissive;
-    finalColor = max(finalColor, vec3(0.0));
-    finalColor = pow(finalColor, vec3(1.0 / 2.2));
+
+    float diffuseGiWeight = 1.0;
+    if (uUseSpecGlossWorkflow > 0.5) {
+        diffuseGiWeight = 1.0 - clamp(max(max(F0.r, F0.g), F0.b), 0.0, 1.0);
+    } else {
+        diffuseGiWeight = 1.0 - metallic;
+    }
+
+    float skyMix = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 hemiColor = mix(uGroundColor, uSkyColor, skyMix);
+    vec3 diffuseGi = baseColor.rgb * diffuseGiWeight * hemiColor * (uAmbientStrength * ao);
+
+    float sunAbove = clamp(dot(L, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
+    float upFacing = clamp(dot(N, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
+    vec3 bounceGi = baseColor.rgb * uGroundColor * (uBounceStrength * sunAbove * upFacing * ao);
+
+    vec3 ambientSpec = F0 * uSkyColor * (uSpecularAmbientStrength * ao) * (1.0 - roughness * 0.65);
+    vec3 ambient = diffuseGi + bounceGi + ambientSpec;
+
+    vec3 finalColor = max(ambient + direct + emissive, vec3(0.0));
+    finalColor = toneMapAces(finalColor);
+    finalColor = linearToSrgb(finalColor);
 
     if (uAlphaMode > 0.5 && uAlphaMode < 1.5) {
         alpha = (alpha >= uAlphaCutoff) ? 1.0 : 0.0;
@@ -316,9 +360,13 @@ local state = {
     whiteTexture = nil,
     blackTexture = nil,
     normalTexture = nil,
-    lightDir = { 0.35, 0.85, 0.25 },
-    lightColor = { 1.75, 1.72, 1.66 },
-    ambientStrength = 0.24
+    lightDir = { 0.35, 0.5, 0.25 },
+    lightColor = { 1.3, 1.24, 1.12 },
+    ambientStrength = 0.16,
+    skyColor = { 0.34, 0.46, 0.68 },
+    groundColor = { 0.14, 0.12, 0.09 },
+    specularAmbientStrength = 0.18,
+    bounceStrength = 0.10
 }
 
 local defaultMaterial = {
@@ -668,6 +716,30 @@ function renderer.setLighting(config)
     if config.ambient ~= nil then
         state.ambientStrength = math.max(0, tonumber(config.ambient) or state.ambientStrength)
     end
+
+    if type(config.skyColor) == "table" then
+        state.skyColor = {
+            math.max(0, tonumber(config.skyColor[1]) or state.skyColor[1]),
+            math.max(0, tonumber(config.skyColor[2]) or state.skyColor[2]),
+            math.max(0, tonumber(config.skyColor[3]) or state.skyColor[3])
+        }
+    end
+
+    if type(config.groundColor) == "table" then
+        state.groundColor = {
+            math.max(0, tonumber(config.groundColor[1]) or state.groundColor[1]),
+            math.max(0, tonumber(config.groundColor[2]) or state.groundColor[2]),
+            math.max(0, tonumber(config.groundColor[3]) or state.groundColor[3])
+        }
+    end
+
+    if config.specularAmbient ~= nil then
+        state.specularAmbientStrength = math.max(0, tonumber(config.specularAmbient) or state.specularAmbientStrength)
+    end
+
+    if config.bounce ~= nil then
+        state.bounceStrength = math.max(0, tonumber(config.bounce) or state.bounceStrength)
+    end
 end
 
 function renderer.drawWorld(objects, camera, backgroundColor)
@@ -703,6 +775,10 @@ function renderer.drawWorld(objects, camera, backgroundColor)
     state.shader:send("uLightDir", state.lightDir)
     state.shader:send("uLightColor", state.lightColor)
     state.shader:send("uAmbientStrength", state.ambientStrength)
+    state.shader:send("uSkyColor", state.skyColor)
+    state.shader:send("uGroundColor", state.groundColor)
+    state.shader:send("uSpecularAmbientStrength", state.specularAmbientStrength)
+    state.shader:send("uBounceStrength", state.bounceStrength)
 
     local opaqueCalls = {}
     local transparentCalls = {}
@@ -766,9 +842,9 @@ function renderer.drawWorld(objects, camera, backgroundColor)
         state.shader:send("uMetallicFactor", tonumber(material.metallicFactor) or 0)
         state.shader:send("uRoughnessFactor", tonumber(material.roughnessFactor) or 1)
         state.shader:send("uEmissiveFactor", {
-            (material.emissiveFactor and material.emissiveFactor[1]) or 0,
-            (material.emissiveFactor and material.emissiveFactor[2]) or 0,
-            (material.emissiveFactor and material.emissiveFactor[3]) or 0
+            math.max(0, (material.emissiveFactor and material.emissiveFactor[1]) or 0),
+            math.max(0, (material.emissiveFactor and material.emissiveFactor[2]) or 0),
+            math.max(0, (material.emissiveFactor and material.emissiveFactor[3]) or 0)
         })
         state.shader:send("uAlphaCutoff", tonumber(material.alphaCutoff) or 0.5)
         state.shader:send("uAlphaMode", alphaModeCode(material.alphaMode))

@@ -10,6 +10,53 @@ local function clamp(value, minValue, maxValue)
 	return value
 end
 
+local defaultStreamingLimits = {
+	minGridCount = 24,
+	maxGridCount = 512,
+	coverageMultiplier = 1.1
+}
+
+local function roundUpEven(value)
+	local v = math.floor(tonumber(value) or 0)
+	if (v % 2) ~= 0 then
+		v = v + 1
+	end
+	return v
+end
+
+local function resolveStreamingGridCount(params, drawDistance, limits)
+	local tileSize = math.max(0.05, tonumber(params and params.tileSize) or 20)
+	local currentGrid = math.max(1, math.floor(tonumber(params and params.gridCount) or 1))
+	local distance = tonumber(drawDistance)
+	if not distance then
+		return currentGrid
+	end
+
+	limits = limits or defaultStreamingLimits
+	local minGrid = math.max(1, math.floor(tonumber(limits.minGridCount) or defaultStreamingLimits.minGridCount))
+	local maxGrid = math.max(minGrid, math.floor(tonumber(limits.maxGridCount) or defaultStreamingLimits.maxGridCount))
+	local coverageMultiplier = math.max(1.0,
+		tonumber(limits.coverageMultiplier) or defaultStreamingLimits.coverageMultiplier)
+	local halfExtent = math.max(tileSize, distance * coverageMultiplier)
+	local targetGrid = math.ceil((halfExtent * 2) / tileSize)
+	targetGrid = roundUpEven(targetGrid)
+	targetGrid = clamp(targetGrid, minGrid, maxGrid)
+	return math.max(1, targetGrid)
+end
+
+function ground.buildStreamingParams(params, drawDistance, limits)
+	local targetGrid = resolveStreamingGridCount(params, drawDistance, limits)
+	if targetGrid == (params and params.gridCount) then
+		return params, targetGrid
+	end
+	local derived = {}
+	for key, value in pairs(params or {}) do
+		derived[key] = value
+	end
+	derived.gridCount = targetGrid
+	return derived, targetGrid
+end
+
 function ground.makeRng(seed)
 	-- Park-Miller LCG using Schrage method (LuaJIT/Lua 5.1 compatible).
 	local m = 2147483647
@@ -385,28 +432,43 @@ function ground.updateGroundStreaming(forceRebuild, context)
 		return false, groundObject
 	end
 
+	local streamParams, streamGridCount = ground.buildStreamingParams(
+		activeGroundParams,
+		context.drawDistance,
+		context.streamingLimits
+	)
+
 	local centerX = groundObject.pos[1] or 0
 	local centerZ = groundObject.pos[3] or 0
-	local halfExtent = (activeGroundParams.gridCount * activeGroundParams.tileSize) * 0.5
+	local halfExtent = (streamParams.gridCount * streamParams.tileSize) * 0.5
 	local threshold = halfExtent * 0.3
+	local currentStreamGrid = math.max(
+		1,
+		math.floor(tonumber(groundObject.streamGridCount) or tonumber(activeGroundParams.gridCount) or 1)
+	)
+	local streamGridChanged = streamGridCount ~= currentStreamGrid
 	local needRecentering = forceRebuild or
+		streamGridChanged or
 		(math.abs(camera.pos[1] - centerX) > threshold) or
 		(math.abs(camera.pos[3] - centerZ) > threshold)
 	if not needRecentering then
 		return false, groundObject
 	end
 
-	local step = math.max(activeGroundParams.tileSize, activeGroundParams.recenterStep or 1)
+	local step = math.max(streamParams.tileSize, streamParams.recenterStep or 1)
 	local snappedX = math.floor((camera.pos[1] / step) + 0.5) * step
 	local snappedZ = math.floor((camera.pos[3] / step) + 0.5) * step
-	if (not forceRebuild) and math.abs(snappedX - centerX) < 1e-6 and math.abs(snappedZ - centerZ) < 1e-6 then
+	if (not forceRebuild) and (not streamGridChanged) and
+		math.abs(snappedX - centerX) < 1e-6 and
+		math.abs(snappedZ - centerZ) < 1e-6 then
 		return false, groundObject
 	end
 
-	groundObject.model = ground.generateGroundMeshModel(activeGroundParams, snappedX, snappedZ)
+	groundObject.model = ground.generateGroundMeshModel(streamParams, snappedX, snappedZ)
 	groundObject.pos[1] = snappedX
 	groundObject.pos[2] = 0
 	groundObject.pos[3] = snappedZ
+	groundObject.streamGridCount = streamGridCount
 	groundObject.halfSize.x = halfExtent
 	groundObject.halfSize.z = halfExtent
 	return true, groundObject
@@ -434,23 +496,30 @@ function ground.rebuildGroundFromParams(params, reason, context)
 		centerZ = math.floor((context.camera.pos[3] / step) + 0.5) * step
 	end
 
-	local groundObject = ground.createGroundObject(normalized, centerX, centerZ, context.q)
+	local streamParams, streamGridCount = ground.buildStreamingParams(
+		normalized,
+		context.drawDistance,
+		context.streamingLimits
+	)
+	local groundObject = ground.createGroundObject(streamParams, centerX, centerZ, context.q)
+	groundObject.streamGridCount = streamGridCount
 	local insertIndex = 1
 	if context.localPlayerObject and context.objects[1] == context.localPlayerObject then
 		insertIndex = 2
 	end
 	table.insert(context.objects, insertIndex, groundObject)
 
-	local worldHalfExtent = (normalized.tileSize * normalized.gridCount) * 0.5
+	local worldHalfExtent = (streamParams.tileSize * streamParams.gridCount) * 0.5
 	context.mapState.zoomExtents = { 160, 420, math.max(worldHalfExtent, 420) }
 	context.mapState.logicalCamera = nil
 	if reason and reason ~= "" and context.log then
 		context.log(string.format(
-			"Ground rebuilt (%s): seed=%d tile=%.3f grid=%d",
+			"Ground rebuilt (%s): seed=%d tile=%.3f grid=%d (stream=%d)",
 			reason,
 			normalized.seed,
 			normalized.tileSize,
-			normalized.gridCount
+			normalized.gridCount,
+			streamGridCount
 		))
 	end
 

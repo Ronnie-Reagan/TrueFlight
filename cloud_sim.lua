@@ -132,7 +132,7 @@ function cloud.spawnCloudField(cloudState, objects, camera, windState, cloudPuff
 				pos = { 0, 0, 0 },
 				rot = q.identity(),
 				scale = { 1, 1, 1 },
-				color = { 0.95, 0.95, 0.97, 0.24 },
+				color = { 0.95, 0.95, 0.97, math.random(0.1, 0.4) },
 				isSolid = false,
 				isCloud = true,
 				cloudOffset = { 0, 0, 0 },
