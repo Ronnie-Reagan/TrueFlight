@@ -143,6 +143,10 @@ function M.create(bindings)
 		local yawGain = camera.yokeMouseYawGain or 14
 		local rollGain = camera.yokeMouseRollGain or 12
 
+		if (pitchAxis ~= 0 or yawAxis ~= 0 or rollAxis ~= 0) and love and love.timer and love.timer.getTime then
+			camera.yokeLastMouseInputAt = love.timer.getTime()
+		end
+
 		yoke.pitch = clamp(yoke.pitch + pitchAxis * mouseSensitivity * pitchGain, -1, 1)
 		yoke.yaw = clamp(yoke.yaw + yawAxis * mouseSensitivity * yawGain, -1, 1)
 		yoke.roll = clamp(yoke.roll + rollAxis * mouseSensitivity * rollGain, -1, 1)

@@ -14,6 +14,18 @@ local function length3(v)
 	return math.sqrt((v[1] or 0) ^ 2 + (v[2] or 0) ^ 2 + (v[3] or 0) ^ 2)
 end
 
+local function isFiniteNumber(value)
+	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function sanitizeNumber(value, fallback)
+	local n = tonumber(value)
+	if isFiniteNumber(n) then
+		return n
+	end
+	return fallback
+end
+
 	-- Engine body axes are +X right, +Y up, +Z forward.
 	-- Aero coefficients are kept in conventional aircraft sign convention:
 	-- alpha positive nose-up, Cm positive nose-up.
@@ -35,8 +47,8 @@ function aero.compute(airVelBody, angVelBody, controls, atmosphereSample, config
 
 	local speed = math.max(0.1, length3({ u, v, w }))
 	local invSpeed = 1 / speed
-	local alpha = math.atan(-w, math.max(1e-4, u))
-	local beta = math.asin(clamp(v * invSpeed, -0.999, 0.999))
+	local rawAlpha = math.atan(-w, math.max(1e-4, u))
+	local rawBeta = math.asin(clamp(v * invSpeed, -0.999, 0.999))
 
 	local rho = math.max(0.02, tonumber(atmosphereSample and atmosphereSample.densityKgM3) or 1.225)
 	local qbar = 0.5 * rho * speed * speed
@@ -53,9 +65,23 @@ function aero.compute(airVelBody, angVelBody, controls, atmosphereSample, config
 	local clAlpha = tonumber(config and config.CLalpha) or 5.5
 	local clElevator = tonumber(config and config.CLElevator) or 0.65
 	local alphaStall = tonumber(config and config.alphaStallRad) or math.rad(15)
+	local alphaModelClamp = math.max(
+		alphaStall + math.rad(2),
+		tonumber(config and config.alphaModelClampRad) or math.rad(50)
+	)
 	local stallDrop = math.max(0.05, tonumber(config and config.stallLiftDropoff) or 0.55)
+	local betaModelClamp = math.max(0.1, tonumber(config and config.betaModelClampRad) or math.rad(65))
 	local cd0 = tonumber(config and config.CD0) or 0.03
 	local inducedDragK = tonumber(config and config.inducedDragK) or 0.045
+	local clMin = tonumber(config and config.CLmin) or -1.4
+	local clMax = tonumber(config and config.CLmax) or 1.8
+	local cdMax = tonumber(config and config.CDmax) or 2.2
+	local cyMax = tonumber(config and config.CYmaxAbs) or 1.4
+	local cMomentMax = tonumber(config and config.CMomentMaxAbs) or 2.8
+	local rateNormMax = tonumber(config and config.rateNormMaxAbs) or 4.0
+
+	local alpha = clamp(rawAlpha, -alphaModelClamp, alphaModelClamp)
+	local beta = clamp(rawBeta, -betaModelClamp, betaModelClamp)
 
 	local cyBeta = tonumber(config and config.CYbeta) or -0.95
 	local cyRudder = tonumber(config and config.CYrudder) or 0.28
@@ -77,9 +103,9 @@ function aero.compute(airVelBody, angVelBody, controls, atmosphereSample, config
 	local cnRudder = tonumber(config and config.CnRudder) or -0.17
 	local cnAileron = tonumber(config and config.CnAileron) or 0.02
 
-	local pitchRateNorm = (pitchRate * meanChord) / (2 * speed)
-	local rollRateNorm = (rollRate * wingSpan) / (2 * speed)
-	local yawRateNorm = (yawRate * wingSpan) / (2 * speed)
+	local pitchRateNorm = clamp((pitchRate * meanChord) / (2 * speed), -rateNormMax, rateNormMax)
+	local rollRateNorm = clamp((rollRate * wingSpan) / (2 * speed), -rateNormMax, rateNormMax)
+	local yawRateNorm = clamp((yawRate * wingSpan) / (2 * speed), -rateNormMax, rateNormMax)
 
 	local cl = cl0 + clAlpha * alpha + clElevator * elevator
 	if math.abs(alpha) > alphaStall then
@@ -87,13 +113,17 @@ function aero.compute(airVelBody, angVelBody, controls, atmosphereSample, config
 		local drop = math.exp(-exceed * stallDrop * 8)
 		cl = cl * clamp(drop, 0.15, 1.0)
 	end
+	cl = clamp(cl, clMin, clMax)
 
-	local cd = math.max(0.01, cd0 + inducedDragK * cl * cl)
-	local cy = cyBeta * beta + cyRudder * rudder
+	local cd = clamp(cd0 + inducedDragK * cl * cl, 0.01, cdMax)
+	local cy = clamp(cyBeta * beta + cyRudder * rudder, -cyMax, cyMax)
 
 	local cRoll = clBeta * beta + clP * rollRateNorm + clR * yawRateNorm + clAileron * aileron + clRudder * rudder
 	local cPitch = cm0 + cmAlpha * alpha + cmQ * pitchRateNorm + cmElevator * elevator
 	local cYaw = cnBeta * beta + cnR * yawRateNorm + cnP * rollRateNorm + cnRudder * rudder + cnAileron * aileron
+	cRoll = clamp(cRoll, -cMomentMax, cMomentMax)
+	cPitch = clamp(cPitch, -cMomentMax, cMomentMax)
+	cYaw = clamp(cYaw, -cMomentMax, cMomentMax)
 
 	-- Aerodynamic forces in conventional axes.
 	local forceForward = qbar * wingArea * ((-cd * math.cos(alpha)) + (cl * math.sin(alpha)))
@@ -105,12 +135,21 @@ function aero.compute(airVelBody, angVelBody, controls, atmosphereSample, config
 	local momentPitch = qbar * wingArea * meanChord * cPitch
 	local momentYaw = qbar * wingArea * wingSpan * cYaw
 
+	forceForward = sanitizeNumber(forceForward, 0)
+	forceRight = sanitizeNumber(forceRight, 0)
+	forceUp = sanitizeNumber(forceUp, 0)
+	momentRoll = sanitizeNumber(momentRoll, 0)
+	momentPitch = sanitizeNumber(momentPitch, 0)
+	momentYaw = sanitizeNumber(momentYaw, 0)
+
 	-- Map back to engine body axes: +X right, +Y up, +Z forward.
 	-- Pitch sign is inverted (conventional +nose-up => engine -about +X).
 	return {
 		speed = speed,
 		alpha = alpha,
 		beta = beta,
+		rawAlpha = rawAlpha,
+		rawBeta = rawBeta,
 		dynamicPressure = qbar,
 		forceBody = { forceRight, forceUp, forceForward },
 		momentBody = { -momentPitch, momentYaw, momentRoll }

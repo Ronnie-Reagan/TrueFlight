@@ -179,7 +179,12 @@ local defaultConfig = {
 	autoTrimUseWorker = true,
 	autoTrimWorkerTimeoutSec = 0.35,
 	groundFriction = 0.01,
-	groundAngularDamping = 0.82
+	groundAngularDamping = 0.82,
+	maxLinearSpeed = 180.0,
+	maxAngularRateRad = math.rad(240),
+	maxForceNewton = 70000.0,
+	maxMomentNewtonMeter = 120000.0,
+	maxPositionAbs = 500000.0
 }
 
 local function clamp(value, minValue, maxValue)
@@ -225,6 +230,60 @@ local function normalize(v)
 		return { 0, 1, 0 }
 	end
 	return { v[1] / len, v[2] / len, v[3] / len }
+end
+
+local function isFiniteNumber(value)
+	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function sanitizeNumber(value, fallback)
+	local n = tonumber(value)
+	if isFiniteNumber(n) then
+		return n
+	end
+	return fallback
+end
+
+local function clampVecMagnitude(v, maxMagnitude)
+	local x = sanitizeNumber(v and v[1], 0)
+	local y = sanitizeNumber(v and v[2], 0)
+	local z = sanitizeNumber(v and v[3], 0)
+	local len = math.sqrt(x * x + y * y + z * z)
+	if len <= maxMagnitude or len <= 1e-8 then
+		return { x, y, z }
+	end
+	local s = maxMagnitude / len
+	return { x * s, y * s, z * s }
+end
+
+local function sanitizeRotation(rot)
+	if type(rot) ~= "table" then
+		return q.identity()
+	end
+	local out = {
+		w = sanitizeNumber(rot.w, 1),
+		x = sanitizeNumber(rot.x, 0),
+		y = sanitizeNumber(rot.y, 0),
+		z = sanitizeNumber(rot.z, 0)
+	}
+	return q.normalize(out)
+end
+
+local function applyNumericalGuards(camera, config)
+	camera.pos = camera.pos or { 0, 0, 0 }
+	camera.flightVel = camera.flightVel or { 0, 0, 0 }
+	camera.flightAngVel = camera.flightAngVel or { 0, 0, 0 }
+	camera.rot = sanitizeRotation(camera.rot)
+
+	local maxPosAbs = math.max(1000, tonumber(config.maxPositionAbs) or 500000)
+	camera.pos[1] = clamp(sanitizeNumber(camera.pos[1], 0), -maxPosAbs, maxPosAbs)
+	camera.pos[2] = clamp(sanitizeNumber(camera.pos[2], 0), -maxPosAbs, maxPosAbs)
+	camera.pos[3] = clamp(sanitizeNumber(camera.pos[3], 0), -maxPosAbs, maxPosAbs)
+
+	local maxLinear = math.max(20, tonumber(config.maxLinearSpeed) or 180)
+	local maxAngular = math.max(0.2, tonumber(config.maxAngularRateRad) or math.rad(240))
+	camera.flightVel = clampVecMagnitude(camera.flightVel, maxLinear)
+	camera.flightAngVel = clampVecMagnitude(camera.flightAngVel, maxAngular)
 end
 
 local function mergeConfig(userConfig)
@@ -289,14 +348,24 @@ local function updatePilotInputs(camera, dt, inputState)
 	local yokeKeyboardRate = camera.yokeKeyboardRate or 2.8
 	local yokeAutoCenterRate = camera.yokeAutoCenterRate or 1.9
 	local centerAlpha = clamp(yokeAutoCenterRate * dt, 0, 1)
+	local now = (loveLib and loveLib.timer and loveLib.timer.getTime and loveLib.timer.getTime()) or 0
+	local yokeMouseHoldDurationSec = math.max(0.0, tonumber(camera.yokeMouseHoldDurationSec) or 0.6)
+	local lastMouseInputAt = tonumber(camera.yokeLastMouseInputAt) or -math.huge
+	local holdMouseYoke = (now - lastMouseInputAt) <= yokeMouseHoldDurationSec
 
 	yoke.pitch = clamp((yoke.pitch or 0) + pitchAxis * yokeKeyboardRate * dt, -1, 1)
 	yoke.yaw = clamp((yoke.yaw or 0) + yawAxis * yokeKeyboardRate * dt, -1, 1)
 	yoke.roll = clamp((yoke.roll or 0) + rollAxis * yokeKeyboardRate * dt, -1, 1)
 
-	yoke.pitch = yoke.pitch + (0 - yoke.pitch) * centerAlpha
-	yoke.yaw = yoke.yaw + (0 - yoke.yaw) * centerAlpha
-	yoke.roll = yoke.roll + (0 - yoke.roll) * centerAlpha
+	if not holdMouseYoke and pitchAxis == 0 then
+		yoke.pitch = yoke.pitch + (0 - yoke.pitch) * centerAlpha
+	end
+	if not holdMouseYoke and yawAxis == 0 then
+		yoke.yaw = yoke.yaw + (0 - yoke.yaw) * centerAlpha
+	end
+	if not holdMouseYoke and rollAxis == 0 then
+		yoke.roll = yoke.roll + (0 - yoke.roll) * centerAlpha
+	end
 end
 
 local function bodyToWorld(rot, v)
@@ -319,11 +388,12 @@ local function resolveCollisionRadius(camera, environment)
 	return 1.0
 end
 
-local function applyTerrainContact(camera, environment, config)
+local function applyTerrainContact(camera, environment, config, dt)
 	local pos = camera.pos
 	local vel = camera.flightVel
 	local radius = resolveCollisionRadius(camera, environment)
 	local onGround = false
+	local stepDt = math.max(0, tonumber(dt) or 0)
 
 	if environment and type(environment.sampleSdf) == "function" then
 		local shouldCheckSdf = true
@@ -355,7 +425,8 @@ local function applyTerrainContact(camera, environment, config)
 
 			local tangent = add(vel, scale(normal, -dot(vel, normal)))
 			local friction = clamp(tonumber(config.groundFriction) or 0.92, 0, 1)
-			vel = add(scale(normal, dot(vel, normal)), scale(tangent, friction))
+			local tangentRetention = clamp(1.0 - friction * stepDt, 0, 1)
+			vel = add(scale(normal, dot(vel, normal)), scale(tangent, tangentRetention))
 			onGround = true
 		end
 	elseif environment and type(environment.groundHeightAt) == "function" then
@@ -366,8 +437,9 @@ local function applyTerrainContact(camera, environment, config)
 				vel[2] = 0
 			end
 			local friction = clamp(tonumber(config.groundFriction) or 0.92, 0, 1)
-			vel[1] = vel[1] * friction
-			vel[3] = vel[3] * friction
+			local tangentRetention = clamp(1.0 - friction * stepDt, 0, 1)
+			vel[1] = vel[1] * tangentRetention
+			vel[3] = vel[3] * tangentRetention
 			onGround = true
 		end
 	end
@@ -377,9 +449,10 @@ local function applyTerrainContact(camera, environment, config)
 	camera.onGround = onGround
 	if onGround then
 		local damp = clamp(tonumber(config.groundAngularDamping) or 0.82, 0, 1)
-		camera.flightAngVel[1] = camera.flightAngVel[1] * damp
-		camera.flightAngVel[2] = camera.flightAngVel[2] * damp
-		camera.flightAngVel[3] = camera.flightAngVel[3] * damp
+		local angularRetention = clamp(1.0 - damp * stepDt, 0, 1)
+		camera.flightAngVel[1] = camera.flightAngVel[1] * angularRetention
+		camera.flightAngVel[2] = camera.flightAngVel[2] * angularRetention
+		camera.flightAngVel[3] = camera.flightAngVel[3] * angularRetention
 	end
 end
 
@@ -396,6 +469,7 @@ function flight.step(camera, dt, inputState, environment, userConfig)
 	end
 
 	local simState = ensureCameraFlightState(camera, config)
+	applyNumericalGuards(camera, config)
 	pollTrimWorkerResponses(simState)
 	updatePilotInputs(camera, dt, inputState)
 
@@ -493,17 +567,17 @@ function flight.step(camera, dt, inputState, environment, userConfig)
 
 		local controls = {
 			elevator = clamp(
-				(-(camera.yoke.pitch or 0) * config.maxElevatorDeflectionRad) + (simState.elevatorTrim or 0),
+				((camera.yoke.pitch or 0) * config.maxElevatorDeflectionRad) + (simState.elevatorTrim or 0),
 				-config.maxElevatorDeflectionRad,
 				config.maxElevatorDeflectionRad
 			),
 			aileron = clamp(
-				(-(camera.yoke.roll or 0)) * config.maxAileronDeflectionRad,
+				(camera.yoke.roll or 0) * config.maxAileronDeflectionRad,
 				-config.maxAileronDeflectionRad,
 				config.maxAileronDeflectionRad
 			),
 			rudder = clamp(
-				(camera.yoke.yaw or 0) * config.maxRudderDeflectionRad,
+				-(camera.yoke.yaw or 0) * config.maxRudderDeflectionRad,
 				-config.maxRudderDeflectionRad,
 				config.maxRudderDeflectionRad
 			)
@@ -517,8 +591,12 @@ function flight.step(camera, dt, inputState, environment, userConfig)
 			aeroState.forceBody[2] or 0,
 			(aeroState.forceBody[3] or 0) + (thrustData.thrustNewton or 0)
 		}
+		forceBody = clampVecMagnitude(forceBody, math.max(1000, tonumber(config.maxForceNewton) or 70000))
 		local forceWorld = bodyToWorld(camera.rot, forceBody)
-		local momentBody = aeroState.momentBody
+		local momentBody = clampVecMagnitude(
+			aeroState.momentBody,
+			math.max(1000, tonumber(config.maxMomentNewtonMeter) or 120000)
+		)
 
 		local rigidBodyState = {
 			pos = { camera.pos[1], camera.pos[2], camera.pos[3] },
@@ -533,7 +611,8 @@ function flight.step(camera, dt, inputState, environment, userConfig)
 		camera.flightAngVel = rigidBodyState.angVel
 		camera.rot = rigidBodyState.rot
 
-		applyTerrainContact(camera, environment, config)
+		applyTerrainContact(camera, environment, config, fixedDt)
+		applyNumericalGuards(camera, config)
 	end
 
 	camera.vel = { camera.flightVel[1], camera.flightVel[2], camera.flightVel[3] }

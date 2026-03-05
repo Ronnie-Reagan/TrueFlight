@@ -1888,6 +1888,7 @@ local function setFlightMode(enabled)
 			camera.yoke.pitch = 0
 			camera.yoke.yaw = 0
 			camera.yoke.roll = 0
+			camera.yokeLastMouseInputAt = -math.huge
 			camera.flightSimState = nil
 			ensureFlightSpawnSafety(45, 32)
 		else
@@ -1898,6 +1899,7 @@ local function setFlightMode(enabled)
 			camera.yoke.pitch = 0
 			camera.yoke.yaw = 0
 			camera.yoke.roll = 0
+			camera.yokeLastMouseInputAt = -math.huge
 			camera.flightRotVel.pitch = 0
 			camera.flightRotVel.yaw = 0
 			camera.flightRotVel.roll = 0
@@ -1947,6 +1949,7 @@ function resetCameraTransform()
 	camera.flightVel = { 0, 0, 0 }
 	camera.flightRotVel = { pitch = 0, yaw = 0, roll = 0 }
 	camera.yoke = { pitch = 0, yaw = 0, roll = 0 }
+	camera.yokeLastMouseInputAt = -math.huge
 	camera.throttle = 0
 	camera.onGround = false
 	camera.walkYaw = 0
@@ -3629,6 +3632,7 @@ function love.load()
 		yoke = { pitch = 0, yaw = 0, roll = 0 },
 		yokeKeyboardRate = 2.8,
 		yokeAutoCenterRate = 2.8,
+		yokeMouseHoldDurationSec = 0.75,
 		yokeMousePitchGain = 8,
 		yokeMouseYawGain = 7,
 		yokeMouseRollGain = 6,
@@ -4130,9 +4134,9 @@ function updateNet()
 			"wy=" .. formatNetFloat(activeAngVel[2] or 0),
 			"wz=" .. formatNetFloat(activeAngVel[3] or 0),
 			"thr=" .. formatNetFloat(camera.throttle or 0),
-			"elev=" .. formatNetFloat(-(activeYoke.pitch or 0)),
-			"ail=" .. formatNetFloat(-(activeYoke.roll or 0)),
-			"rud=" .. formatNetFloat(activeYoke.yaw or 0),
+			"elev=" .. formatNetFloat(activeYoke.pitch or 0),
+			"ail=" .. formatNetFloat(activeYoke.roll or 0),
+			"rud=" .. formatNetFloat(-(activeYoke.yaw or 0)),
 			"tick=" .. tostring(math.floor(flightTick)),
 			"ts=" .. formatNetFloat(now),
 			"scale=" .. formatNetFloat(activeScale),

@@ -874,7 +874,9 @@ function renderer.drawWorld(objects, camera, backgroundColor)
     end
 
     love.graphics.setShader(state.shader)
-    pcall(love.graphics.setMeshCullMode, "back")
+    -- Engine camera space is +Z forward with a custom projection, which flips front-face winding
+    -- relative to LOVE's default expectation. Cull "front" so visible faces match CPU raster path.
+    pcall(love.graphics.setMeshCullMode, "front")
 
     local camPos = camera.pos or { 0, 0, 0 }
     local camRot = camera.rot or { w = 1, x = 0, y = 0, z = 0 }
@@ -1050,7 +1052,7 @@ function renderer.drawWorld(objects, camera, backgroundColor)
         state.shader:send("uNormalScale", normalScale)
         state.shader:send("uOcclusionStrength", occlusionStrength)
 
-        pcall(love.graphics.setMeshCullMode, material.doubleSided and "none" or "back")
+        pcall(love.graphics.setMeshCullMode, material.doubleSided and "none" or "front")
         love.graphics.draw(mesh)
         return call.triangleCount or (mesh:getVertexCount() / 3)
     end
