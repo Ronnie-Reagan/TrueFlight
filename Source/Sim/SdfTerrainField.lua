@@ -125,7 +125,19 @@ local defaultParams = {
 	heightGain = 0.52,
 	surfaceDetailAmplitude = 14,
 	surfaceDetailFrequency = 0.013,
+	ridgeAmplitude = 38,
+	ridgeFrequency = 0.0042,
+	ridgeSharpness = 2.1,
+	macroWarpAmplitude = 90,
+	macroWarpFrequency = 0.00055,
+	terraceStrength = 0.16,
+	terraceStep = 18,
 	waterLevel = -12,
+	shorelineBand = 5,
+	waterWaveAmplitude = 1.6,
+	waterWaveFrequency = 0.014,
+	biomeFrequency = 0.0009,
+	snowLine = 140,
 	caveEnabled = false,
 	caveFrequency = 0.018,
 	caveThreshold = 0.68,
@@ -240,7 +252,19 @@ function field.normalizeParams(params, defaults)
 	base.heightGain = clamp(tonumber(base.heightGain) or 0.52, 0.1, 0.95)
 	base.surfaceDetailAmplitude = math.max(0, tonumber(base.surfaceDetailAmplitude) or 14)
 	base.surfaceDetailFrequency = math.max(0.0001, tonumber(base.surfaceDetailFrequency) or 0.013)
+	base.ridgeAmplitude = math.max(0, tonumber(base.ridgeAmplitude) or 38)
+	base.ridgeFrequency = math.max(0.00001, tonumber(base.ridgeFrequency) or 0.0042)
+	base.ridgeSharpness = math.max(0.3, tonumber(base.ridgeSharpness) or 2.1)
+	base.macroWarpAmplitude = math.max(0, tonumber(base.macroWarpAmplitude) or 90)
+	base.macroWarpFrequency = math.max(0.00001, tonumber(base.macroWarpFrequency) or 0.00055)
+	base.terraceStrength = clamp(tonumber(base.terraceStrength) or 0.16, 0, 1)
+	base.terraceStep = math.max(1, tonumber(base.terraceStep) or 18)
 	base.waterLevel = tonumber(base.waterLevel) or -12
+	base.shorelineBand = math.max(0.1, tonumber(base.shorelineBand) or 5)
+	base.waterWaveAmplitude = math.max(0, tonumber(base.waterWaveAmplitude) or 1.6)
+	base.waterWaveFrequency = math.max(0.0001, tonumber(base.waterWaveFrequency) or 0.014)
+	base.biomeFrequency = math.max(0.00001, tonumber(base.biomeFrequency) or 0.0009)
+	base.snowLine = tonumber(base.snowLine) or 140
 	base.caveEnabled = base.caveEnabled ~= false
 	base.caveFrequency = math.max(0.0001, tonumber(base.caveFrequency) or 0.018)
 	base.caveThreshold = clamp(tonumber(base.caveThreshold) or 0.68, 0.05, 0.95)
@@ -270,14 +294,47 @@ function field.createContext(params)
 	}
 end
 
+function field.sampleWaterHeight(x, z, context)
+	local params = context.params
+	local waveFreq = params.waterWaveFrequency
+	local waveAmp = params.waterWaveAmplitude
+	if waveAmp <= 0 then
+		return params.waterLevel
+	end
+
+	local n1 = valueNoise2(x * waveFreq, z * waveFreq, params.seed + 700) * 2 - 1
+	local n2 = valueNoise2(x * waveFreq * 1.9, z * waveFreq * 1.9, params.seed + 937) * 2 - 1
+	local n = n1 * 0.7 + n2 * 0.3
+	return params.waterLevel + n * waveAmp
+end
+
 function field.sampleSurfaceHeight(x, z, context)
 	local params = context.params
-	local nx = x * params.heightFrequency
-	local nz = z * params.heightFrequency
+	local warpN1 = valueNoise2(x * params.macroWarpFrequency, z * params.macroWarpFrequency, params.seed + 211) * 2 - 1
+	local warpN2 = valueNoise2(x * params.macroWarpFrequency, z * params.macroWarpFrequency, params.seed + 347) * 2 - 1
+	local warpX = warpN1 * params.macroWarpAmplitude
+	local warpZ = warpN2 * params.macroWarpAmplitude
+	local wx = x + warpX
+	local wz = z + warpZ
+
+	local nx = wx * params.heightFrequency
+	local nz = wz * params.heightFrequency
 	local heightNoise = fbm2(nx, nz, params.heightOctaves, params.heightLacunarity, params.heightGain, params.seed) * 2 - 1
-	local detailNoise = valueNoise2(x * params.surfaceDetailFrequency, z * params.surfaceDetailFrequency, params.seed + 907) * 2
+	local detailNoise = valueNoise2(wx * params.surfaceDetailFrequency, wz * params.surfaceDetailFrequency, params.seed + 907) * 2
 		- 1
-	local baseSurface = params.baseHeight + (heightNoise * params.heightAmplitude) + (detailNoise * params.surfaceDetailAmplitude)
+	local ridge = fbm2(wx * params.ridgeFrequency, wz * params.ridgeFrequency, 4, 2.03, 0.53, params.seed + 503) * 2 - 1
+	ridge = 1.0 - math.abs(ridge)
+	ridge = ridge ^ params.ridgeSharpness
+	local ridgeSigned = (ridge * 2.0) - 1.0
+
+	local baseSurface = params.baseHeight +
+		(heightNoise * params.heightAmplitude) +
+		(detailNoise * params.surfaceDetailAmplitude) +
+		(ridgeSigned * params.ridgeAmplitude)
+	if params.terraceStrength > 0 then
+		local stepped = math.floor((baseSurface / params.terraceStep) + 0.5) * params.terraceStep
+		baseSurface = baseSurface * (1.0 - params.terraceStrength) + stepped * params.terraceStrength
+	end
 	return applyDynamicCratersToSurfaceHeight(x, z, baseSurface, params)
 end
 
@@ -328,18 +385,73 @@ function field.sampleColorAtWorld(x, y, z, context)
 	local params = context.params
 	local surface = field.sampleSurfaceHeight(x, z, context)
 	local depthBelowSurface = surface - y
-	if surface <= params.waterLevel + 1.0 then
-		return { 0.08, 0.19, 0.34 }
+	local waterHeight = field.sampleWaterHeight(x, z, context)
+	if y <= (waterHeight + 0.25) then
+		local foam = clamp((params.waterLevel + 0.8 - surface) / math.max(0.1, params.shorelineBand), 0, 1)
+		local waveTint = valueNoise2(x * 0.021, z * 0.021, params.seed + 1431) * 2 - 1
+		local waterBase = {
+			clamp((params.waterColor and params.waterColor[1]) or 0.08, 0, 1),
+			clamp((params.waterColor and params.waterColor[2]) or 0.19, 0, 1),
+			clamp((params.waterColor and params.waterColor[3]) or 0.34, 0, 1)
+		}
+		return {
+			clamp(waterBase[1] + waveTint * 0.02 + foam * 0.12, 0, 1),
+			clamp(waterBase[2] + waveTint * 0.04 + foam * 0.16, 0, 1),
+			clamp(waterBase[3] + waveTint * 0.06 + foam * 0.18, 0, 1)
+		}
 	end
 	if depthBelowSurface > 14 then
-		return { 0.31, 0.26, 0.23 }
+		return { 0.30, 0.26, 0.23 }
 	end
 
-	local n = valueNoise2(x * 0.012, z * 0.012, params.seed + 331) * 2 - 1
-	local g = clamp(0.48 + n * 0.12, 0.12, 0.85)
-	local r = clamp(0.26 + n * 0.08, 0.08, 0.68)
-	local b = clamp(0.18 + n * 0.06, 0.06, 0.5)
-	return { r, g, b }
+	local hL = field.sampleSurfaceHeight(x - 1.5, z, context)
+	local hR = field.sampleSurfaceHeight(x + 1.5, z, context)
+	local hD = field.sampleSurfaceHeight(x, z - 1.5, context)
+	local hU = field.sampleSurfaceHeight(x, z + 1.5, context)
+	local slope = clamp(math.sqrt((hR - hL) * (hR - hL) + (hU - hD) * (hU - hD)) * 0.18, 0, 1)
+
+	local biomeNoise = fbm2(
+		x * params.biomeFrequency,
+		z * params.biomeFrequency,
+		4,
+		2.0,
+		0.54,
+		params.seed + 1201
+	) * 2 - 1
+	local elevation01 = clamp((surface - params.baseHeight + params.heightAmplitude) / math.max(1.0, params.heightAmplitude * 2), 0,
+		1)
+	local wetness = clamp((params.waterLevel + params.shorelineBand - surface) / math.max(0.1, params.shorelineBand), 0, 1)
+	local snow = clamp((surface - params.snowLine) / 90, 0, 1)
+
+	local grass = { 0.24, 0.48, 0.25 }
+	local forest = { 0.16, 0.33, 0.20 }
+	local sand = { 0.70, 0.64, 0.47 }
+	local rock = { 0.47, 0.45, 0.43 }
+	local snowColor = { 0.88, 0.89, 0.92 }
+
+	local biomeBlend = clamp((biomeNoise + 1) * 0.5 + elevation01 * 0.16, 0, 1)
+	local baseR = grass[1] + (forest[1] - grass[1]) * biomeBlend
+	local baseG = grass[2] + (forest[2] - grass[2]) * biomeBlend
+	local baseB = grass[3] + (forest[3] - grass[3]) * biomeBlend
+
+	baseR = baseR + (sand[1] - baseR) * wetness
+	baseG = baseG + (sand[2] - baseG) * wetness
+	baseB = baseB + (sand[3] - baseB) * wetness
+
+	local rockMix = clamp((slope - 0.12) * 1.5, 0, 1)
+	baseR = baseR + (rock[1] - baseR) * rockMix
+	baseG = baseG + (rock[2] - baseG) * rockMix
+	baseB = baseB + (rock[3] - baseB) * rockMix
+
+	baseR = baseR + (snowColor[1] - baseR) * snow
+	baseG = baseG + (snowColor[2] - baseG) * snow
+	baseB = baseB + (snowColor[3] - baseB) * snow
+
+	local micro = valueNoise2(x * 0.013, z * 0.013, params.seed + 331) * 2 - 1
+	baseR = clamp(baseR + micro * 0.05, 0, 1)
+	baseG = clamp(baseG + micro * 0.06, 0, 1)
+	baseB = clamp(baseB + micro * 0.04, 0, 1)
+	return { baseR, baseG, baseB }
 end
 
 return field

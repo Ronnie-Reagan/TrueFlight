@@ -205,11 +205,7 @@ function M.create(bindings)
 	end
 
 	local function shouldRenderObjectForView(obj)
-		local viewState = resolve(getViewState)
 		if not obj then
-			return false
-		end
-		if obj.isLocalPlayer and viewState.mode == "first_person" then
 			return false
 		end
 		return true
@@ -247,6 +243,58 @@ function M.create(bindings)
 		emissive[3] = tintB * emissiveScale
 
 		renderObjects[#renderObjects + 1] = marker
+	end
+
+	local function updateLocalPlayerPortal(obj, activeCam)
+		if type(obj) ~= "table" or not obj.isLocalPlayer then
+			return
+		end
+
+		obj.firstPersonPortal = obj.firstPersonPortal or {
+			enabled = false,
+			origin = { 0, 0, 0 },
+			dir = { 0, 0, 1 },
+			startDist = 0.05,
+			endDist = 10.0,
+			radiusNear = 0.35,
+			radiusFar = 1.1
+		}
+		local portal = obj.firstPersonPortal
+		local viewState = resolve(getViewState)
+		if not viewState or viewState.mode ~= "first_person" or not activeCam or not activeCam.pos or not activeCam.rot then
+			portal.enabled = false
+			return
+		end
+
+		local hx, hy, hz = 1, 1, 1
+		if type(obj.halfSize) == "table" then
+			hx = math.max(0.01, math.abs(tonumber(obj.halfSize.x or obj.halfSize[1]) or 1))
+			hy = math.max(0.01, math.abs(tonumber(obj.halfSize.y or obj.halfSize[2]) or 1))
+			hz = math.max(0.01, math.abs(tonumber(obj.halfSize.z or obj.halfSize[3]) or 1))
+		end
+
+		local dir = q.rotateVector(activeCam.rot, { 0, 0, 1 })
+		local dLen = math.sqrt((dir[1] or 0) ^ 2 + (dir[2] or 0) ^ 2 + (dir[3] or 0) ^ 2)
+		if dLen <= 1e-6 then
+			dir = { 0, 0, 1 }
+			dLen = 1
+		end
+
+		local nearRadius = math.max(0.30, (hx + hy) * 0.22)
+		local farRadius = math.max(nearRadius + 0.45, nearRadius * 2.6)
+		local tunnelLen = math.max(8.0, hz * 14.0 + 4.0)
+
+		portal.enabled = true
+		portal.origin[1] = activeCam.pos[1]
+		portal.origin[2] = activeCam.pos[2]
+		portal.origin[3] = activeCam.pos[3]
+		portal.dir[1] = (dir[1] or 0) / dLen
+		portal.dir[2] = (dir[2] or 0) / dLen
+		portal.dir[3] = (dir[3] or 1) / dLen
+		portal.startDist = 0.01
+		portal.endDist = tunnelLen
+		portal.radiusNear = nearRadius
+		portal.radiusFar = farRadius
 	end
 
 	local function estimateCullRadius(obj)
@@ -295,6 +343,7 @@ function M.create(bindings)
 
 		for _, obj in ipairs(objects) do
 			if shouldRenderObjectForView(obj) then
+				updateLocalPlayerPortal(obj, activeCam)
 				local cullPos = obj.terrainCenter or obj.pos
 				if activeCam and activeCam.pos and cullPos then
 					local dx = (cullPos[1] or 0) - activeCam.pos[1]

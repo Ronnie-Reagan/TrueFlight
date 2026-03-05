@@ -683,6 +683,53 @@ local function sampleMaterialColorForFace(obj, face, faceIndex)
     return { r, g, b, a }
 end
 
+local function pointInsidePortal(worldPos, portal)
+    if type(worldPos) ~= "table" or type(portal) ~= "table" or not portal.enabled then
+        return false
+    end
+    local origin = portal.origin
+    local dir = portal.dir
+    if type(origin) ~= "table" or type(dir) ~= "table" then
+        return false
+    end
+
+    local dx = (worldPos[1] or 0) - (origin[1] or 0)
+    local dy = (worldPos[2] or 0) - (origin[2] or 0)
+    local dz = (worldPos[3] or 0) - (origin[3] or 0)
+    local dirX, dirY, dirZ = dir[1] or 0, dir[2] or 0, dir[3] or 1
+    local dirLen = math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
+    if dirLen <= 1e-6 then
+        dirX, dirY, dirZ, dirLen = 0, 0, 1, 1
+    end
+    dirX, dirY, dirZ = dirX / dirLen, dirY / dirLen, dirZ / dirLen
+
+    local t = dx * dirX + dy * dirY + dz * dirZ
+    local startDist = math.max(0, tonumber(portal.startDist) or 0)
+    local endDist = math.max(startDist + 1e-4, tonumber(portal.endDist) or (startDist + 1))
+    if t < startDist or t > endDist then
+        return false
+    end
+
+    local cx = (origin[1] or 0) + dirX * t
+    local cy = (origin[2] or 0) + dirY * t
+    local cz = (origin[3] or 0) + dirZ * t
+    local rx = (worldPos[1] or 0) - cx
+    local ry = (worldPos[2] or 0) - cy
+    local rz = (worldPos[3] or 0) - cz
+    local radial = math.sqrt(rx * rx + ry * ry + rz * rz)
+
+    local k = (t - startDist) / math.max(1e-4, endDist - startDist)
+    if k < 0 then
+        k = 0
+    elseif k > 1 then
+        k = 1
+    end
+    local radiusNear = math.max(0, tonumber(portal.radiusNear) or 0)
+    local radiusFar = math.max(0, tonumber(portal.radiusFar) or radiusNear)
+    local radius = radiusNear + (radiusFar - radiusNear) * k
+    return radial <= radius
+end
+
 function engine.drawObject(obj, cullBackfaces, camera, vector3, q, screen, zBuffer, imageData, writeDepth)
     if not obj or not obj.model or not obj.model.vertices or not obj.model.faces then
         return imageData
@@ -690,10 +737,30 @@ function engine.drawObject(obj, cullBackfaces, camera, vector3, q, screen, zBuff
     local useBackfaceCulling = (cullBackfaces ~= false)
 
     local transformedVerts = {}
+    local worldVerts = {}
 
     -- Transform vertices into camera space
     for i, v in ipairs(obj.model.vertices) do
-        local x, y, z = engine.transformVertex(v, obj, camera, q)
+        local scale = obj.scale
+        local sx = (scale and scale[1]) or 1
+        local sy = (scale and scale[2]) or 1
+        local sz = (scale and scale[3]) or 1
+        local scaled = { v[1] * sx, v[2] * sy, v[3] * sz }
+        local objRot = obj.rot or q.identity()
+        local rotated = q.rotateVector(objRot, scaled)
+        local objPos = obj.pos or { 0, 0, 0 }
+        local world = { rotated[1] + objPos[1], rotated[2] + objPos[2], rotated[3] + objPos[3] }
+        worldVerts[i] = world
+
+        local rel = { world[1] - camera.pos[1], world[2] - camera.pos[2], world[3] - camera.pos[3] }
+        local camConj = (q.conjugate and q.conjugate(camera.rot)) or {
+            w = camera.rot.w,
+            x = -camera.rot.x,
+            y = -camera.rot.y,
+            z = -camera.rot.z
+        }
+        local camSpace = q.rotateVector(camConj, rel)
+        local x, y, z = camSpace[1], camSpace[2], camSpace[3]
         transformedVerts[i] = { x, y, z }
     end
 
@@ -711,6 +778,26 @@ function engine.drawObject(obj, cullBackfaces, camera, vector3, q, screen, zBuff
             table.insert(poly, vertex)
         end
         if not faceValid then goto continue end
+
+        if obj.firstPersonPortal and obj.firstPersonPortal.enabled and #face >= 3 then
+            local wcx, wcy, wcz = 0, 0, 0
+            local count = 0
+            for _, vi in ipairs(face) do
+                local wv = worldVerts[vi]
+                if wv then
+                    wcx = wcx + (wv[1] or 0)
+                    wcy = wcy + (wv[2] or 0)
+                    wcz = wcz + (wv[3] or 0)
+                    count = count + 1
+                end
+            end
+            if count > 0 then
+                local center = { wcx / count, wcy / count, wcz / count }
+                if pointInsidePortal(center, obj.firstPersonPortal) then
+                    goto continue
+                end
+            end
+        end
 
         poly = engine.clipPolygonToNearPlane(poly, 0.0001)
 

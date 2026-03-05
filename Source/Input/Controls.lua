@@ -171,6 +171,7 @@ end
 local function bindingModifiersMatch(required, current, strict)
 	required = required or {}
 	current = current or { alt = false, ctrl = false, shift = false }
+	local hasRequiredModifier = required.alt or required.ctrl or required.shift
 
 	if required.alt and not current.alt then
 		return false
@@ -182,7 +183,10 @@ local function bindingModifiersMatch(required, current, strict)
 		return false
 	end
 
-	if strict then
+	-- Strict matching is only meaningful when a binding explicitly asks for modifiers.
+	-- Plain bindings (for example mouse look axes) should continue working while Shift/Ctrl/Alt
+	-- are held for separate actions like sprint/afterburner.
+	if strict and hasRequiredModifier then
 		if current.alt and not required.alt then
 			return false
 		end

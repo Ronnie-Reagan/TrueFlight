@@ -154,6 +154,72 @@ local function buildSurfaceChunkModel(bounds, cellSize, fieldContext)
 		end
 	end
 
+	local params = fieldContext and fieldContext.params or {}
+	local waterLevel = tonumber(params.waterLevel)
+	local shorelineBand = math.max(0.2, tonumber(params.shorelineBand) or 5.0)
+	if waterLevel then
+		for iz = 1, nz do
+			local r0 = grid[iz]
+			local r1 = grid[iz + 1]
+			for ix = 1, nx do
+				local i00 = r0[ix]
+				local i10 = r0[ix + 1]
+				local i01 = r1[ix]
+				local i11 = r1[ix + 1]
+
+				local v00 = model.vertices[i00]
+				local v10 = model.vertices[i10]
+				local v01 = model.vertices[i01]
+				local v11 = model.vertices[i11]
+				local yMin = math.min(v00[2], v10[2], v01[2], v11[2])
+				if yMin <= (waterLevel + shorelineBand) then
+					local w00 = sdfField.sampleWaterHeight(v00[1], v00[3], fieldContext)
+					local w10 = sdfField.sampleWaterHeight(v10[1], v10[3], fieldContext)
+					local w01 = sdfField.sampleWaterHeight(v01[1], v01[3], fieldContext)
+					local w11 = sdfField.sampleWaterHeight(v11[1], v11[3], fieldContext)
+					if w00 > (v00[2] + 0.12) or w10 > (v10[2] + 0.12) or w01 > (v01[2] + 0.12) or w11 > (v11[2] + 0.12) then
+						local centerX = (v00[1] + v10[1] + v01[1] + v11[1]) * 0.25
+						local centerZ = (v00[3] + v10[3] + v01[3] + v11[3]) * 0.25
+						local centerY = (w00 + w10 + w01 + w11) * 0.25
+						local color = sdfField.sampleColorAtWorld(centerX, centerY, centerZ, fieldContext)
+						local rgba = { color[1], color[2], color[3], 1.0 }
+						local base = #model.vertices
+
+						model.vertices[base + 1] = { v00[1], w00, v00[3] }
+						model.vertices[base + 2] = { v10[1], w10, v10[3] }
+						model.vertices[base + 3] = { v11[1], w11, v11[3] }
+						model.vertices[base + 4] = { v01[1], w01, v01[3] }
+						model.vertexNormals[base + 1] = { 0, 1, 0 }
+						model.vertexNormals[base + 2] = { 0, 1, 0 }
+						model.vertexNormals[base + 3] = { 0, 1, 0 }
+						model.vertexNormals[base + 4] = { 0, 1, 0 }
+						model.vertexColors[base + 1] = rgba
+						model.vertexColors[base + 2] = rgba
+						model.vertexColors[base + 3] = rgba
+						model.vertexColors[base + 4] = rgba
+						model.faces[#model.faces + 1] = { base + 1, base + 3, base + 2 }
+						model.faceColors[#model.faceColors + 1] = rgba
+						model.faces[#model.faces + 1] = { base + 1, base + 4, base + 3 }
+						model.faceColors[#model.faceColors + 1] = rgba
+
+						if w00 > maxY then
+							maxY = w00
+						end
+						if w10 > maxY then
+							maxY = w10
+						end
+						if w01 > maxY then
+							maxY = w01
+						end
+						if w11 > maxY then
+							maxY = w11
+						end
+					end
+				end
+			end
+		end
+	end
+
 	if minY == math.huge or maxY == -math.huge then
 		minY = 0
 		maxY = 0
@@ -229,6 +295,11 @@ local function paramsSignature(params)
 		tostring(tonumber(params.chunkSize) or 64),
 		tostring(tonumber(params.heightAmplitude) or 120),
 		tostring(tonumber(params.heightFrequency) or 0.0018),
+		tostring(tonumber(params.ridgeAmplitude) or 38),
+		tostring(tonumber(params.ridgeFrequency) or 0.0042),
+		tostring(tonumber(params.terraceStrength) or 0.16),
+		tostring(tonumber(params.waterLevel) or -12),
+		tostring(tonumber(params.waterWaveAmplitude) or 1.6),
 		tostring(math.floor(tonumber(params.tunnelCount) or 0)),
 		tostring((params.caveEnabled ~= false) and 1 or 0),
 		tostring(tonumber(params.caveFrequency) or 0.018),

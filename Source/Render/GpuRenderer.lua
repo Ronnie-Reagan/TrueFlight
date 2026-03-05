@@ -31,6 +31,13 @@ uniform vec3 uCamPos;
 uniform vec3 uCamRight;
 uniform vec3 uCamUp;
 uniform vec3 uCamForward;
+uniform float uPortalEnabled;
+uniform vec3 uPortalOrigin;
+uniform vec3 uPortalDir;
+uniform float uPortalStart;
+uniform float uPortalEnd;
+uniform float uPortalRadiusNear;
+uniform float uPortalRadiusFar;
 uniform vec3 uColor;
 uniform float uAlpha;
 uniform float uFov;
@@ -226,6 +233,22 @@ vec2 pickUv(float texCoordSet)
 
 vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
 {
+    if (uPortalEnabled > 0.5) {
+        vec3 portalDir = safeNormalize(uPortalDir);
+        vec3 toPoint = vWorldPos - uPortalOrigin;
+        float tPortal = dot(toPoint, portalDir);
+        if (tPortal >= uPortalStart && tPortal <= uPortalEnd) {
+            vec3 closest = uPortalOrigin + portalDir * tPortal;
+            float radial = length(vWorldPos - closest);
+            float span = max(1e-4, uPortalEnd - uPortalStart);
+            float k = clamp((tPortal - uPortalStart) / span, 0.0, 1.0);
+            float radius = mix(uPortalRadiusNear, uPortalRadiusFar, k);
+            if (radial <= radius) {
+                discard;
+            }
+        }
+    }
+
     vec2 uvBase = pickUv(uBaseColorTexCoord);
     vec4 baseColor = vec4(1.0);
 
@@ -958,6 +981,34 @@ function renderer.drawWorld(objects, camera, backgroundColor)
         state.shader:send("uObjScale", { scale[1] or 1, scale[2] or 1, scale[3] or 1 })
         state.shader:send("uColor", tint)
         state.shader:send("uAlpha", alpha)
+        local portal = obj.firstPersonPortal
+        local portalEnabled = type(portal) == "table" and portal.enabled and type(portal.origin) == "table" and
+            type(portal.dir) == "table"
+        if portalEnabled then
+            state.shader:send("uPortalEnabled", 1)
+            state.shader:send("uPortalOrigin", {
+                tonumber(portal.origin[1]) or 0,
+                tonumber(portal.origin[2]) or 0,
+                tonumber(portal.origin[3]) or 0
+            })
+            state.shader:send("uPortalDir", normalize3({
+                tonumber(portal.dir[1]) or 0,
+                tonumber(portal.dir[2]) or 0,
+                tonumber(portal.dir[3]) or 1
+            }))
+            state.shader:send("uPortalStart", math.max(0, tonumber(portal.startDist) or 0))
+            state.shader:send("uPortalEnd", math.max(0.01, tonumber(portal.endDist) or 0.01))
+            state.shader:send("uPortalRadiusNear", math.max(0, tonumber(portal.radiusNear) or 0))
+            state.shader:send("uPortalRadiusFar", math.max(0, tonumber(portal.radiusFar) or 0))
+        else
+            state.shader:send("uPortalEnabled", 0)
+            state.shader:send("uPortalOrigin", { 0, 0, 0 })
+            state.shader:send("uPortalDir", { 0, 0, 1 })
+            state.shader:send("uPortalStart", 0)
+            state.shader:send("uPortalEnd", 0.01)
+            state.shader:send("uPortalRadiusNear", 0)
+            state.shader:send("uPortalRadiusFar", 0)
+        end
 
         local baseColorFactor = material.baseColorFactor or defaultMaterial.baseColorFactor
         state.shader:send("uBaseColorFactor", {

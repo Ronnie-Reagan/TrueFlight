@@ -1873,6 +1873,9 @@ end
 
 local function setFlightMode(enabled)
 	flightSimMode = enabled and true or false
+	if (not flightSimMode) and startupUi and startupUi.audioRuntime and type(startupUi.audioRuntime.stop) == "function" then
+		startupUi.audioRuntime:stop()
+	end
 	if camera then
 		camera.yoke = camera.yoke or { pitch = 0, yaw = 0, roll = 0 }
 		camera.flightRotVel = camera.flightRotVel or { pitch = 0, yaw = 0, roll = 0 }
@@ -3882,7 +3885,7 @@ function love.load()
 	end
 	syncActivePlayerModelState()
 
-	-- Local avatar is synced to player camera each update; hidden in first-person, shown in third-person.
+	-- Local avatar is synced to player camera each update.
 	localPlayerObject = {
 		model = playerModel,
 		pos = { camera.pos[1], camera.pos[2], camera.pos[3] },
@@ -3911,6 +3914,20 @@ function love.load()
 	cloudSim.pickNextWindTarget(windState)
 	cloudSim.spawnCloudField(cloudState, objects, camera, windState, cloudPuffModel, q, nil, love.timer.getTime())
 	logger.log(string.format("Cloud field initialized (%d groups).", #cloudState.groups))
+	setStartupUiStage("Audio Graph", 0.7, "Synthesizing procedural engine/atmosphere audio.")
+	if startupUi.audioRuntime and type(startupUi.audioRuntime.stop) == "function" then
+		startupUi.audioRuntime:stop()
+	end
+	startupUi.audioRuntime = require("Source.Audio.ProceduralAudio").create({
+		sampleRate = 22050,
+		bufferSamples = 1024,
+		queueDepth = 8
+	})
+	if startupUi.audioRuntime and startupUi.audioRuntime.available then
+		logger.log("Procedural audio initialized.")
+	else
+		logger.log("Procedural audio unavailable on this runtime.")
+	end
 	if bootRestartSnapshotState then
 		if applyRestartSnapshot(bootRestartSnapshotState) then
 			logger.log("Restart state restored.")
@@ -4489,6 +4506,32 @@ function love.update(dt)
 		end
 	end
 
+	if startupUi.audioRuntime and type(startupUi.audioRuntime.update) == "function" and camera then
+		local terrainRef = activeGroundParams or defaultGroundParams or {}
+		local speedVec = (flightSimMode and camera.flightVel) or camera.vel or { 0, 0, 0 }
+		local airspeed = math.sqrt(
+			(speedVec[1] or 0) * (speedVec[1] or 0) +
+			(speedVec[2] or 0) * (speedVec[2] or 0) +
+			(speedVec[3] or 0) * (speedVec[3] or 0)
+		)
+		local groundY = sampleGroundHeightAtWorld(camera.pos[1], camera.pos[3], terrainRef)
+		local waterLevel = tonumber(terrainRef.waterLevel) or -12
+		local waterDist = math.abs((camera.pos[2] or 0) - waterLevel)
+		local waterProximity = clamp(1.0 - (waterDist / 95.0), 0, 1)
+		if groundY > (waterLevel + 2.0) then
+			waterProximity = waterProximity * 0.35
+		end
+		startupUi.audioRuntime:update({
+			dt = dt,
+			active = flightSimMode,
+			throttle = flightSimMode and (camera.throttle or 0) or 0,
+			afterburner = flightSimMode and controls.isActionDown("flight_afterburner"),
+			airspeed = airspeed,
+			waterProximity = waterProximity,
+			paused = pauseMenu.active and true or false
+		})
+	end
+
 	updateNet()
 	resolveActiveRenderCamera()
 	serviceNetworkEvents()
@@ -4521,6 +4564,12 @@ function love.update(dt)
 			love.event.quit()
 			return
 		end
+	end
+end
+
+function love.quit()
+	if startupUi.audioRuntime and type(startupUi.audioRuntime.stop) == "function" then
+		startupUi.audioRuntime:stop()
 	end
 end
 
