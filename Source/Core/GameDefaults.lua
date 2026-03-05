@@ -1,10 +1,12 @@
 local M = {}
+local flightModelDefaults = require "Source.Sim.FlightModelDefaults"
 
 -- Builds all mutable startup state tables in one place so main.lua can focus on behavior flow.
 -- @param cubeModel table Base cube model used for fallbacks and debug objects.
 -- @param q table Quaternion helper module used for identity rotation initialization.
 -- @return table defaults Bag of fully initialized state tables/scalars.
 function M.create(cubeModel, q)
+	local flightModel = flightModelDefaults.create()
 	return {
 		viewState = {
 			mode = "first_person",
@@ -203,69 +205,7 @@ function M.create(cubeModel, q)
 			incoming = {}
 		},
 		worldHalfExtent = 2000,
-		flightModel = {
-			physicsHz = 120,
-			maxSubsteps = 8,
-			maxFrameDt = 0.1,
-			metersPerUnit = 1.0,
-			massKg = 1150,
-			Ixx = 1200,
-			Iyy = 1700,
-			Izz = 2500,
-			Ixz = 0,
-			wingArea = 16.2,
-			wingSpan = 10.9,
-			meanChord = 1.5,
-			CL0 = 0.25,
-			CLalpha = 5.5,
-			CLElevator = 0.65,
-			alphaStallRad = math.rad(15),
-			stallLiftDropoff = 0.55,
-			CD0 = 0.03,
-			inducedDragK = 0.045,
-			CYbeta = -0.95,
-			CYrudder = 0.28,
-			Cm0 = 0.04,
-			CmAlpha = -1.2,
-			CmQ = -12,
-			CmElevator = -1.35,
-			ClBeta = -0.12,
-			ClP = -0.48,
-			ClR = 0.16,
-			ClAileron = 0.22,
-			ClRudder = 0.03,
-			CnBeta = 0.16,
-			CnR = -0.24,
-			CnP = -0.06,
-			CnRudder = -0.17,
-			CnAileron = 0.02,
-			maxThrustSeaLevel = 3200,
-			maxEffectivePropSpeed = 95,
-			throttleTimeConstant = 0.8,
-			maxElevatorDeflectionRad = math.rad(25),
-			maxAileronDeflectionRad = math.rad(20),
-			maxRudderDeflectionRad = math.rad(30),
-			enableAutoTrim = true,
-			autoTrimUpdateHz = 6,
-			autoTrimUseWorker = true,
-			autoTrimWorkerTimeoutSec = 0.35,
-			groundFriction = 0.92,
-			groundAngularDamping = 0.82,
-			stabilityAugmentation = true,
-			pitchRateDampingMoment = 2600,
-			yawRateDampingMoment = 1700,
-			rollRateDampingMoment = 2100,
-			controlAuthoritySpeed = 34.0,
-			minControlAuthority = 0.28,
-			pitchControlScale = 0.78,
-			rollControlScale = 0.72,
-			yawControlScale = 0.65,
-			crashEnabled = true,
-			crashNormalSpeed = 13.0,
-			crashTotalSpeed = 32.0,
-			crashAngularSpeed = math.rad(160),
-			crashCooldownSec = 0.9
-		},
+		flightModel = flightModel,
 		terrainSdf = {
 			chunkSize = 64,
 			lod0Radius = 2,

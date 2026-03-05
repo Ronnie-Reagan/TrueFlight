@@ -3792,7 +3792,7 @@ function love.load()
 		flightRotResponse = 6.0,
 		yoke = { pitch = 0, yaw = 0, roll = 0 },
 		yokeKeyboardRate = 2.8,
-		yokeAutoCenterRate = 2.8,
+		yokeAutoCenterRate = 0.5,
 		yokeMouseHoldDurationSec = 0.75,
 		yokeMousePitchGain = 8,
 		yokeMouseYawGain = 7,

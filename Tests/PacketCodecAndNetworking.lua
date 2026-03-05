@@ -14,6 +14,15 @@ local function assertEq(actual, expected, message)
     end
 end
 
+local function quatLen(rot)
+    return math.sqrt(
+        (rot.w or 0) * (rot.w or 0) +
+        (rot.x or 0) * (rot.x or 0) +
+        (rot.y or 0) * (rot.y or 0) +
+        (rot.z or 0) * (rot.z or 0)
+    )
+end
+
 local function buildLegacyStatePacket()
     local fields = {
         "STATE",
@@ -182,6 +191,37 @@ local function run()
         extrapolationCap = 0.2
     })
     assertTrue((peers[9].basePos and peers[9].basePos[1] or 0) >= 10.45, "interpolation should advance peer position")
+
+    local spinPacket = buildState3Packet({
+        id = 11,
+        px = 0,
+        py = 5,
+        pz = 0,
+        vx = 0,
+        vy = 0,
+        vz = 0,
+        wx = 0,
+        wy = 1.0,
+        wz = 0,
+        tick = 300,
+        ts = 2.0
+    })
+    networking.handlePacket(spinPacket, peers, objects, q, objectDefs.cubeModel, nil, {
+        scale = 1.0,
+        modelHash = "builtin-cube",
+        planeScale = 1.0,
+        walkingScale = 1.0,
+        planeModelHash = "builtin-cube",
+        walkingModelHash = "builtin-cube",
+        role = "plane"
+    }, 20.0)
+    networking.updateRemoteInterpolation(peers, 20.4, {
+        interpolationDelay = 0.0,
+        extrapolationCap = 0.2
+    })
+    assertTrue(peers[11] ~= nil and peers[11].baseRot ~= nil, "extrapolated peer should keep rotation state")
+    assertTrue(math.abs(quatLen(peers[11].baseRot) - 1.0) < 1e-3, "extrapolated quaternion should stay normalized")
+    assertTrue(math.abs(peers[11].baseRot.y or 0) > 1e-4, "angular velocity extrapolation should rotate peer state")
 
     print("Packet codec/networking tests passed")
 end

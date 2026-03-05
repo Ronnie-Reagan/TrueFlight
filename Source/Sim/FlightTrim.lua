@@ -24,7 +24,7 @@ function trim.estimateLevelAlpha(config, atmosphereSample, trueAirspeed)
 end
 
 function trim.estimateElevatorForLevelFlight(config, atmosphereSample, trueAirspeed)
-	local alpha = trim.estimateLevelAlpha(config, atmosphereSample, trueAirspeed)
+	local alpha = -trim.estimateLevelAlpha(config, atmosphereSample, trueAirspeed)
 	local cm0 = tonumber(config and config.Cm0) or 0.04
 	local cmAlpha = tonumber(config and config.CmAlpha) or -1.2
 	local cmElevator = tonumber(config and config.CmElevator) or -1.35

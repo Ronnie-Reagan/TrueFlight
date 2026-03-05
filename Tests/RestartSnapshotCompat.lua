@@ -50,6 +50,20 @@ local function run()
     assertTrue(type(migratedV2.state.camera.flightAngVel) == "table", "v2->v3 should add flight angular velocity")
     assertTrue(type(migratedV2.state.camera.flightSimState) == "table", "v2->v3 should add flight sim state")
 
+    local tunedV3 = {
+        _l2d3d_restart_version = 3,
+        state = {
+            graphicsSettings = { renderScale = 1.25, drawDistance = 2400 },
+            flightModelConfig = { massKg = 980, maxThrustSeaLevel = 4100, groundFriction = 0.66, enableAutoTrim = false },
+            terrainSdfDefaults = { seed = 1337, heightAmplitude = 180, caveEnabled = true, meshBuildBudget = 4 }
+        }
+    }
+    local passthrough, sourceV3 = compat.migrate(tunedV3, 3)
+    assertTrue(sourceV3 == 3, "v3 source version should be reported on passthrough")
+    assertTrue(passthrough == tunedV3, "same-version migration should preserve payload identity")
+    assertTrue(passthrough.state.flightModelConfig.massKg == 980, "flight tuning should remain intact across restart payload pass-through")
+    assertTrue(passthrough.state.terrainSdfDefaults.meshBuildBudget == 4, "terrain tuning should remain intact across restart payload pass-through")
+
     local unsupported, unsupportedErr = compat.migrate({ _l2d3d_restart_version = 99 }, 3)
     assertTrue(unsupported == nil, "unsupported version should fail migration")
     assertTrue(type(unsupportedErr) == "string" and unsupportedErr:find("unsupported"), "unsupported error should be explicit")

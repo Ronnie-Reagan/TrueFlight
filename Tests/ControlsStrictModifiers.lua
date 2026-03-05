@@ -20,6 +20,7 @@ package.loaded["love"] = {
     }
 }
 
+package.loaded["Source.Input.Controls"] = nil
 local controls = require("Source.Input.Controls")
 
 local function assertTrue(value, message)

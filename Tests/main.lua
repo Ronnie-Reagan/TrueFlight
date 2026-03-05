@@ -56,7 +56,14 @@ local function listTests()
 end
 
 local function runTestFile(filename)
-	local ok, err = pcall(dofile, filename)
+	local chunk, loadErr = love.filesystem.load(filename)
+	if not chunk then
+		print(string.format("[FAIL] %s", filename))
+		print(tostring(loadErr))
+		return false
+	end
+
+	local ok, err = pcall(chunk)
 	if ok then
 		print(string.format("[PASS] %s", filename))
 		return true
