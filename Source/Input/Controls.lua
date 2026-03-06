@@ -171,6 +171,7 @@ end
 local function bindingModifiersMatch(required, current, strict)
 	required = required or {}
 	current = current or { alt = false, ctrl = false, shift = false }
+	local hasRequiredModifier = required.alt or required.ctrl or required.shift
 
 	if required.alt and not current.alt then
 		return false
@@ -182,13 +183,54 @@ local function bindingModifiersMatch(required, current, strict)
 		return false
 	end
 
-	if strict then
+	-- Strict matching is only meaningful when a binding explicitly asks for modifiers.
+	-- Plain bindings (for example mouse look axes) should continue working while Shift/Ctrl/Alt
+	-- are held for separate actions like sprint/afterburner.
+	if strict and hasRequiredModifier then
 		if current.alt and not required.alt then
+			return false
+		end
+		if current.ctrl and not required.ctrl then
+			return false
+		end
+		if current.shift and not required.shift then
 			return false
 		end
 	end
 
 	return true
+end
+
+local function keyMatchesBinding(bindingKey, inputKey)
+	if bindingKey == inputKey then
+		return true
+	end
+	if (bindingKey == "lshift" or bindingKey == "rshift") and (inputKey == "lshift" or inputKey == "rshift") then
+		return true
+	end
+	if (bindingKey == "lctrl" or bindingKey == "rctrl") and (inputKey == "lctrl" or inputKey == "rctrl") then
+		return true
+	end
+	if (bindingKey == "lalt" or bindingKey == "ralt") and (inputKey == "lalt" or inputKey == "ralt") then
+		return true
+	end
+	return false
+end
+
+local function isBindingKeyDown(bindingKey)
+	if not bindingKey then
+		return false
+	end
+	if bindingKey == "lshift" or bindingKey == "rshift" then
+		return love.keyboard.isDown("lshift", "rshift")
+	end
+	if bindingKey == "lctrl" or bindingKey == "rctrl" then
+		return love.keyboard.isDown("lctrl", "rctrl")
+	end
+	if bindingKey == "lalt" or bindingKey == "ralt" then
+		return love.keyboard.isDown("lalt", "ralt")
+	end
+	return love.keyboard.isDown(bindingKey)
 end
 
 function controls.formatBinding(binding)
@@ -238,7 +280,7 @@ function controls.isActionDown(actionId)
 
 	local modifiers = controls.getCurrentModifiers()
 	for _, binding in ipairs(action.bindings or {}) do
-		if binding.kind == "key" and binding.key and love.keyboard.isDown(binding.key) then
+		if binding.kind == "key" and binding.key and isBindingKeyDown(binding.key) then
 			if bindingModifiersMatch(binding.modifiers, modifiers, false) then
 				return true
 			end
@@ -280,7 +322,7 @@ function controls.actionTriggeredByKey(actionId, key, modifiers)
 	end
 
 	for _, binding in ipairs(action.bindings or {}) do
-		if binding.kind == "key" and binding.key == key and bindingModifiersMatch(binding.modifiers, modifiers, false) then
+		if binding.kind == "key" and keyMatchesBinding(binding.key, key) and bindingModifiersMatch(binding.modifiers, modifiers, false) then
 			return true
 		end
 	end

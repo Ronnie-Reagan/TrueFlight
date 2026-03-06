@@ -113,12 +113,21 @@ function M.create(bindings)
 		local mouseSensitivity = tonumber(resolve(getMouseSensitivity)) or 0.001
 		local invertLookY = resolve(getInvertLookY) and true or false
 
-		local pitchDown = controls.getActionMouseAxisValue("flight_pitch_down", dx, dy, modifiers)
-		local pitchUp = controls.getActionMouseAxisValue("flight_pitch_up", dx, dy, modifiers)
-		local rollLeft = controls.getActionMouseAxisValue("flight_roll_left", dx, dy, modifiers)
-		local rollRight = controls.getActionMouseAxisValue("flight_roll_right", dx, dy, modifiers)
-		local yawLeft = controls.getActionMouseAxisValue("flight_yaw_left", dx, dy, modifiers)
-		local yawRight = controls.getActionMouseAxisValue("flight_yaw_right", dx, dy, modifiers)
+		local clampedDx = clamp(tonumber(dx) or 0, -42, 42)
+		local clampedDy = clamp(tonumber(dy) or 0, -42, 42)
+		if math.abs(clampedDx) < 0.2 then
+			clampedDx = 0
+		end
+		if math.abs(clampedDy) < 0.2 then
+			clampedDy = 0
+		end
+
+		local pitchDown = controls.getActionMouseAxisValue("flight_pitch_down", clampedDx, clampedDy, modifiers)
+		local pitchUp = controls.getActionMouseAxisValue("flight_pitch_up", clampedDx, clampedDy, modifiers)
+		local rollLeft = controls.getActionMouseAxisValue("flight_roll_left", clampedDx, clampedDy, modifiers)
+		local rollRight = controls.getActionMouseAxisValue("flight_roll_right", clampedDx, clampedDy, modifiers)
+		local yawLeft = controls.getActionMouseAxisValue("flight_yaw_left", clampedDx, clampedDy, modifiers)
+		local yawRight = controls.getActionMouseAxisValue("flight_yaw_right", clampedDx, clampedDy, modifiers)
 
 		local pitchAxis = pitchDown - pitchUp
 		local yawAxis = yawRight - yawLeft
@@ -130,9 +139,13 @@ function M.create(bindings)
 
 		camera.yoke = camera.yoke or { pitch = 0, yaw = 0, roll = 0 }
 		local yoke = camera.yoke
-		local pitchGain = camera.yokeMousePitchGain or 16
-		local yawGain = camera.yokeMouseYawGain or 14
-		local rollGain = camera.yokeMouseRollGain or 12
+		local pitchGain = camera.yokeMousePitchGain or 10
+		local yawGain = camera.yokeMouseYawGain or 9
+		local rollGain = camera.yokeMouseRollGain or 8
+
+		if (pitchAxis ~= 0 or yawAxis ~= 0 or rollAxis ~= 0) and love and love.timer and love.timer.getTime then
+			camera.yokeLastMouseInputAt = love.timer.getTime()
+		end
 
 		yoke.pitch = clamp(yoke.pitch + pitchAxis * mouseSensitivity * pitchGain, -1, 1)
 		yoke.yaw = clamp(yoke.yaw + yawAxis * mouseSensitivity * yawGain, -1, 1)

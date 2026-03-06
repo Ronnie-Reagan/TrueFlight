@@ -1,6 +1,8 @@
 local renderer = {}
 local love = require "love"
 local q = require "Source.Math.Quat"
+local skyModel = require "Source.Render.SkyModel"
+local shadowPass = require "Source.Render.ShadowPass"
 
 local ATTR_POSITION = 0
 local ATTR_COLOR = 2
@@ -29,6 +31,13 @@ uniform vec3 uCamPos;
 uniform vec3 uCamRight;
 uniform vec3 uCamUp;
 uniform vec3 uCamForward;
+uniform float uPortalEnabled;
+uniform vec3 uPortalOrigin;
+uniform vec3 uPortalDir;
+uniform float uPortalStart;
+uniform float uPortalEnd;
+uniform float uPortalRadiusNear;
+uniform float uPortalRadiusFar;
 uniform vec3 uColor;
 uniform float uAlpha;
 uniform float uFov;
@@ -84,6 +93,12 @@ uniform vec3 uSkyColor;
 uniform vec3 uGroundColor;
 uniform float uSpecularAmbientStrength;
 uniform float uBounceStrength;
+uniform float uFogDensity;
+uniform float uFogHeightFalloff;
+uniform vec3 uFogColor;
+uniform float uExposureEV;
+uniform float uShadowEnabled;
+uniform float uShadowSoftness;
 
 varying vec3 vWorldPos;
 varying vec3 vWorldNormal;
@@ -218,6 +233,22 @@ vec2 pickUv(float texCoordSet)
 
 vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
 {
+    if (uPortalEnabled > 0.5) {
+        vec3 portalDir = safeNormalize(uPortalDir);
+        vec3 toPoint = vWorldPos - uPortalOrigin;
+        float tPortal = dot(toPoint, portalDir);
+        if (tPortal >= uPortalStart && tPortal <= uPortalEnd) {
+            vec3 closest = uPortalOrigin + portalDir * tPortal;
+            float radial = length(vWorldPos - closest);
+            float span = max(1e-4, uPortalEnd - uPortalStart);
+            float k = clamp((tPortal - uPortalStart) / span, 0.0, 1.0);
+            float radius = mix(uPortalRadiusNear, uPortalRadiusFar, k);
+            if (radial <= radius) {
+                discard;
+            }
+        }
+    }
+
     vec2 uvBase = pickUv(uBaseColorTexCoord);
     vec4 baseColor = vec4(1.0);
 
@@ -320,6 +351,11 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
     }
 
     vec3 direct = (diffuse + specular) * uLightColor * NdotL;
+    if (uShadowEnabled > 0.5) {
+        float heightMask = clamp((vWorldPos.y + 18.0) / max(10.0, 70.0 * uShadowSoftness), 0.0, 1.0);
+        float pseudoShadow = mix(0.62, 1.0, heightMask);
+        direct *= pseudoShadow;
+    }
 
     float diffuseGiWeight = 1.0;
     if (uUseSpecGlossWorkflow > 0.5) {
@@ -340,6 +376,13 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
     vec3 ambient = diffuseGi + bounceGi + ambientSpec;
 
     vec3 finalColor = max(ambient + direct + emissive, vec3(0.0));
+    finalColor *= exp2(uExposureEV);
+    if (uFogDensity > 1e-6) {
+        float viewDist = length(uCamPos - vWorldPos);
+        float heightTerm = exp(-max(vWorldPos.y, 0.0) * max(0.0, uFogHeightFalloff));
+        float fogFactor = 1.0 - exp(-viewDist * uFogDensity * max(0.05, heightTerm));
+        finalColor = mix(finalColor, uFogColor, clamp(fogFactor, 0.0, 1.0));
+    }
     finalColor = toneMapAces(finalColor);
     finalColor = linearToSrgb(finalColor);
 
@@ -375,7 +418,14 @@ local state = {
     skyColor = { 0.34, 0.46, 0.68 },
     groundColor = { 0.14, 0.12, 0.09 },
     specularAmbientStrength = 0.18,
-    bounceStrength = 0.10
+    bounceStrength = 0.10,
+    fogDensity = 0.00055,
+    fogHeightFalloff = 0.0017,
+    fogColor = { 0.64, 0.73, 0.84 },
+    exposureEV = 0.0,
+    turbidity = 2.4,
+    shadowEnabled = false,
+    shadowSoftness = 1.6
 }
 
 local defaultMaterial = {
@@ -440,8 +490,16 @@ end
 local function buildSolidTexture(r, g, b, a)
     local imageData = love.image.newImageData(1, 1)
     imageData:setPixel(0, 0, r, g, b, a or 1)
-    local image = love.graphics.newImage(imageData)
-    image:setFilter("linear", "linear")
+    local okImage, image = pcall(function()
+        return love.graphics.newImage(imageData, { mipmaps = true, linear = true })
+    end)
+    if not okImage or not image then
+        image = love.graphics.newImage(imageData)
+    end
+    image:setFilter("linear", "linear", 4)
+    pcall(function()
+        image:setMipmapFilter("linear", 0.25)
+    end)
     return image
 end
 
@@ -719,6 +777,21 @@ function renderer.setLighting(config)
         return
     end
 
+    if config.useAnalyticSky then
+        local evaluated = skyModel.evaluate(config.direction or state.lightDir, {
+            turbidity = config.turbidity or state.turbidity,
+            sunIntensity = config.sunIntensity or config.intensity or 1.2,
+            ambient = config.ambient or state.ambientStrength,
+            exposureEV = config.exposureEV or state.exposureEV
+        })
+        config.direction = evaluated.lightDir
+        config.color = evaluated.lightColor
+        config.skyColor = evaluated.skyColor
+        config.groundColor = evaluated.groundColor
+        config.ambient = evaluated.ambient
+        config.exposureEV = evaluated.exposureEV
+    end
+
     if type(config.direction) == "table" then
         state.lightDir = normalize3({
             tonumber(config.direction[1]) or state.lightDir[1],
@@ -762,6 +835,52 @@ function renderer.setLighting(config)
     if config.bounce ~= nil then
         state.bounceStrength = math.max(0, tonumber(config.bounce) or state.bounceStrength)
     end
+
+    if config.fogDensity ~= nil then
+        state.fogDensity = math.max(0, tonumber(config.fogDensity) or state.fogDensity)
+    end
+    if config.fogHeightFalloff ~= nil then
+        state.fogHeightFalloff = math.max(0, tonumber(config.fogHeightFalloff) or state.fogHeightFalloff)
+    end
+    if type(config.fogColor) == "table" then
+        state.fogColor = {
+            math.max(0, tonumber(config.fogColor[1]) or state.fogColor[1]),
+            math.max(0, tonumber(config.fogColor[2]) or state.fogColor[2]),
+            math.max(0, tonumber(config.fogColor[3]) or state.fogColor[3])
+        }
+    end
+    if config.exposureEV ~= nil then
+        state.exposureEV = tonumber(config.exposureEV) or state.exposureEV
+    end
+    if config.turbidity ~= nil then
+        state.turbidity = math.max(1.0, tonumber(config.turbidity) or state.turbidity)
+    end
+    if config.shadowEnabled ~= nil then
+        state.shadowEnabled = config.shadowEnabled and true or false
+    end
+    if config.shadowSoftness ~= nil then
+        state.shadowSoftness = math.max(0.4, tonumber(config.shadowSoftness) or state.shadowSoftness)
+    end
+    shadowPass.configure({
+        enabled = state.shadowEnabled,
+        maxDistance = config.shadowDistance or state.farPlane,
+        softness = state.shadowSoftness
+    })
+end
+
+function renderer.setShadowConfig(config)
+    config = config or {}
+    if config.enabled ~= nil then
+        state.shadowEnabled = config.enabled and true or false
+    end
+    if config.softness ~= nil then
+        state.shadowSoftness = math.max(0.4, tonumber(config.softness) or state.shadowSoftness)
+    end
+    shadowPass.configure({
+        enabled = state.shadowEnabled,
+        softness = state.shadowSoftness,
+        maxDistance = config.distance or state.farPlane
+    })
 end
 
 function renderer.drawWorld(objects, camera, backgroundColor)
@@ -771,13 +890,16 @@ function renderer.drawWorld(objects, camera, backgroundColor)
 
     local bg = backgroundColor or { 0.2, 0.2, 0.75, 1.0 }
     love.graphics.clear(bg[1], bg[2], bg[3], bg[4] or 1.0)
+    shadowPass.begin()
 
     if state.depthSupported then
         love.graphics.setDepthMode("lequal", true)
     end
 
     love.graphics.setShader(state.shader)
-    pcall(love.graphics.setMeshCullMode, "back")
+    -- Engine camera space is +Z forward with a custom projection, which flips front-face winding
+    -- relative to LOVE's default expectation. Cull "front" so visible faces match CPU raster path.
+    pcall(love.graphics.setMeshCullMode, "front")
 
     local camPos = camera.pos or { 0, 0, 0 }
     local camRot = camera.rot or { w = 1, x = 0, y = 0, z = 0 }
@@ -801,6 +923,12 @@ function renderer.drawWorld(objects, camera, backgroundColor)
     state.shader:send("uGroundColor", state.groundColor)
     state.shader:send("uSpecularAmbientStrength", state.specularAmbientStrength)
     state.shader:send("uBounceStrength", state.bounceStrength)
+    state.shader:send("uFogDensity", state.fogDensity)
+    state.shader:send("uFogHeightFalloff", state.fogHeightFalloff)
+    state.shader:send("uFogColor", state.fogColor)
+    state.shader:send("uExposureEV", state.exposureEV)
+    state.shader:send("uShadowEnabled", state.shadowEnabled and 1 or 0)
+    state.shader:send("uShadowSoftness", state.shadowSoftness)
 
     local opaqueCalls = {}
     local transparentCalls = {}
@@ -853,6 +981,34 @@ function renderer.drawWorld(objects, camera, backgroundColor)
         state.shader:send("uObjScale", { scale[1] or 1, scale[2] or 1, scale[3] or 1 })
         state.shader:send("uColor", tint)
         state.shader:send("uAlpha", alpha)
+        local portal = obj.firstPersonPortal
+        local portalEnabled = type(portal) == "table" and portal.enabled and type(portal.origin) == "table" and
+            type(portal.dir) == "table"
+        if portalEnabled then
+            state.shader:send("uPortalEnabled", 1)
+            state.shader:send("uPortalOrigin", {
+                tonumber(portal.origin[1]) or 0,
+                tonumber(portal.origin[2]) or 0,
+                tonumber(portal.origin[3]) or 0
+            })
+            state.shader:send("uPortalDir", normalize3({
+                tonumber(portal.dir[1]) or 0,
+                tonumber(portal.dir[2]) or 0,
+                tonumber(portal.dir[3]) or 1
+            }))
+            state.shader:send("uPortalStart", math.max(0, tonumber(portal.startDist) or 0))
+            state.shader:send("uPortalEnd", math.max(0.01, tonumber(portal.endDist) or 0.01))
+            state.shader:send("uPortalRadiusNear", math.max(0, tonumber(portal.radiusNear) or 0))
+            state.shader:send("uPortalRadiusFar", math.max(0, tonumber(portal.radiusFar) or 0))
+        else
+            state.shader:send("uPortalEnabled", 0)
+            state.shader:send("uPortalOrigin", { 0, 0, 0 })
+            state.shader:send("uPortalDir", { 0, 0, 1 })
+            state.shader:send("uPortalStart", 0)
+            state.shader:send("uPortalEnd", 0.01)
+            state.shader:send("uPortalRadiusNear", 0)
+            state.shader:send("uPortalRadiusFar", 0)
+        end
 
         local baseColorFactor = material.baseColorFactor or defaultMaterial.baseColorFactor
         state.shader:send("uBaseColorFactor", {
@@ -947,7 +1103,7 @@ function renderer.drawWorld(objects, camera, backgroundColor)
         state.shader:send("uNormalScale", normalScale)
         state.shader:send("uOcclusionStrength", occlusionStrength)
 
-        pcall(love.graphics.setMeshCullMode, material.doubleSided and "none" or "back")
+        pcall(love.graphics.setMeshCullMode, material.doubleSided and "none" or "front")
         love.graphics.draw(mesh)
         return call.triangleCount or (mesh:getVertexCount() / 3)
     end
@@ -992,6 +1148,7 @@ function renderer.drawWorld(objects, camera, backgroundColor)
         log(string.format("first frame: objects=%d triangles=%d", #objects, triangleCount))
         state.loggedFirstFrame = true
     end
+    shadowPass.finish()
 
     return true, triangleCount
 end
