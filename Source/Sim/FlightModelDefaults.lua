@@ -43,7 +43,7 @@ function defaults.create()
 		maxElevatorDeflectionRad = math.rad(25),
 		maxAileronDeflectionRad = math.rad(20),
 		maxRudderDeflectionRad = math.rad(30),
-		enableAutoTrim = true,
+		enableAutoTrim = false,
 		autoTrimUpdateHz = 6,
 		autoTrimUseWorker = true,
 		autoTrimWorkerTimeoutSec = 0.35,

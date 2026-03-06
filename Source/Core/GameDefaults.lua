@@ -39,7 +39,7 @@ function M.create(cubeModel, q)
 			mHeld = false,
 			mUsedForZoom = false,
 			zoomIndex = 2,
-			zoomExtents = { 140, 400, 1000 },
+			zoomExtents = { 200, 400, 800, 1600, 3200 },
 			panel = { margin = 14, widthRatio = 0.24, maxSize = 280, minSize = 150 },
 			logicalCamera = nil,
 			mapImage = nil,
@@ -113,12 +113,12 @@ function M.create(cubeModel, q)
 			masterVolume = 0.80,
 			engineVolume = 0.85,
 			ambienceVolume = 0.70,
-			enginePitch = 1.00,
+			enginePitch = 0.3,
 			ambiencePitch = 1.00
 		},
 		characterOrientation = {
 			plane = {
-				yaw = 0,
+				yaw = -90,
 				pitch = 0,
 				roll = 0
 			},
@@ -215,7 +215,7 @@ function M.create(cubeModel, q)
 		worldHalfExtent = 2000,
 		flightModel = flightModel,
 		terrainSdf = {
-			chunkSize = 64,
+			chunkSize = 128,
 			lod0Radius = 2,
 			lod1Radius = 4,
 			lod0CellSize = 3,
@@ -224,7 +224,7 @@ function M.create(cubeModel, q)
 			workerMaxInflight = 3,
 			chunkCacheLimit = 768,
 			minY = -120,
-			maxY = 220,
+			maxY = 1200,
 			baseHeight = 0,
 			heightAmplitude = 120,
 			heightFrequency = 0.0018,
@@ -266,7 +266,7 @@ function M.create(cubeModel, q)
 			dynamicCraters = {}
 		},
 		lightingModel = {
-			fogDensity = 0.00055,
+			fogDensity = 0.00011,
 			fogHeightFalloff = 0.0017,
 			fogR = 0.64,
 			fogG = 0.73,
@@ -279,7 +279,7 @@ function M.create(cubeModel, q)
 		},
 		defaultGroundParams = {
 			seed = math.random(0, 999999),
-			chunkSize = 64,
+			chunkSize = 128,
 			lod0Radius = 2,
 			lod1Radius = 4,
 			lod0CellSize = 3,
@@ -288,7 +288,7 @@ function M.create(cubeModel, q)
 			workerMaxInflight = 3,
 			chunkCacheLimit = 768,
 			minY = -120,
-			maxY = 220,
+			maxY = 1200,
 			tileSize = 20,
 			gridCount = 128,
 			baseHeight = 0,
@@ -360,7 +360,7 @@ function M.create(cubeModel, q)
 			groupCount = 200,
 			minAltitude = 1200,
 			maxAltitude = 3750,
-			spawnRadius = 1400,
+			spawnRadius = 1800,
 			despawnRadius = 1900,
 			minGroupSize = 30,
 			maxGroupSize = 100,

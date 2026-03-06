@@ -95,7 +95,7 @@ local playerModel = cubeModel
 local MIN_MODEL_SCALE = 0.1
 defaultPlayerModelPath = "Assets/Models/DualEngine2.glb"
 normalizedPlayerModelExtent = 2.2
-defaultPlayerModelScale = 1.35
+defaultPlayerModelScale = 3.0
 defaultWalkingModelScale = 1.0
 playerPlaneModelScale = defaultPlayerModelScale
 playerPlaneModelHash = "builtin-cube"
@@ -156,7 +156,7 @@ local audioSettings = defaults.audioSettings or {
 	masterVolume = 0.8,
 	engineVolume = 0.85,
 	ambienceVolume = 0.7,
-	enginePitch = 1.0,
+	enginePitch = 0.3,
 	ambiencePitch = 1.0
 }
 local characterOrientation = defaults.characterOrientation
