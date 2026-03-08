@@ -1,2 +1,2 @@
-if youve come here from disocrd:
+if youve come here from discord:
 fuck off
