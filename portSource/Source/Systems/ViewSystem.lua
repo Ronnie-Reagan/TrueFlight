@@ -25,6 +25,8 @@ function M.create(bindings)
 	local getSunSettings = bindings.sunSettings
 	local getSunDebugObject = bindings.sunDebugObject
 	local getGraphicsSettings = bindings.graphicsSettings
+	local getActiveGroundParams = bindings.activeGroundParams
+	local resolveTerrainRenderBand = bindings.resolveTerrainRenderBand
 	local getMouseSensitivity = bindings.mouseSensitivity
 	local getInvertLookY = bindings.invertLookY
 	local getWalkingPitchLimit = bindings.walkingPitchLimit
@@ -384,6 +386,40 @@ function M.create(bindings)
 		return false
 	end
 
+	local function syncTerrainChunkClipBand(obj, drawDistance)
+		if type(obj) ~= "table" then
+			return
+		end
+		if not obj.isTerrainChunk then
+			obj.terrainClipBand = nil
+			return
+		end
+		if type(resolveTerrainRenderBand) ~= "function" then
+			obj.terrainClipBand = nil
+			return
+		end
+
+		local params = resolve(getActiveGroundParams)
+		if type(params) ~= "table" then
+			obj.terrainClipBand = nil
+			return
+		end
+
+		local band = resolveTerrainRenderBand(params, math.floor(tonumber(obj.chunkLod) or 0), drawDistance)
+		if type(band) ~= "table" or band.enabled == false then
+			obj.terrainClipBand = nil
+			return
+		end
+
+		obj.terrainClipBand = obj.terrainClipBand or {}
+		obj.terrainClipBand.enabled = true
+		obj.terrainClipBand.innerRadius = math.max(0.0, tonumber(band.innerRadius) or 0.0)
+		obj.terrainClipBand.outerRadius = math.max(
+			obj.terrainClipBand.innerRadius + 0.001,
+			tonumber(band.outerRadius) or (obj.terrainClipBand.innerRadius + 0.001)
+		)
+	end
+
 	local function buildRenderObjectList()
 		local viewState = resolve(getViewState)
 		local camera = resolve(getCamera)
@@ -409,6 +445,7 @@ function M.create(bindings)
 
 		for _, obj in ipairs(objects) do
 			if shouldRenderObjectForView(obj) then
+				syncTerrainChunkClipBand(obj, maxDist)
 				updateLocalPlayerPortal(obj, activeCam)
 				local cullPos = obj.terrainCenter or obj.pos
 				if activeCam and activeCam.pos and cullPos then

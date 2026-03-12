@@ -1661,6 +1661,10 @@ local viewSystem = viewSystemModule.create({
 	graphicsSettings = function()
 		return graphicsSettings
 	end,
+	activeGroundParams = function()
+		return activeGroundParams or defaultGroundParams
+	end,
+	resolveTerrainRenderBand = terrainSdfSystem.resolveTerrainRenderBand,
 	sampleGroundHeightAt = function(worldX, worldZ)
 		local terrainRef = terrainState or activeGroundParams or defaultGroundParams
 		return terrainSdfSystem.sampleGroundHeightAtWorld(worldX, worldZ, terrainRef) or 0

@@ -38,6 +38,9 @@ uniform float uPortalStart;
 uniform float uPortalEnd;
 uniform float uPortalRadiusNear;
 uniform float uPortalRadiusFar;
+uniform float uTerrainClipEnabled;
+uniform float uTerrainClipInnerRadius;
+uniform float uTerrainClipOuterRadius;
 uniform vec3 uColor;
 uniform float uAlpha;
 uniform float uFov;
@@ -233,6 +236,14 @@ vec2 pickUv(float texCoordSet)
 
 vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
 {
+    if (uTerrainClipEnabled > 0.5) {
+        vec2 terrainDelta = vWorldPos.xz - uCamPos.xz;
+        float terrainDist = length(terrainDelta);
+        if (terrainDist < uTerrainClipInnerRadius || terrainDist >= uTerrainClipOuterRadius) {
+            discard;
+        }
+    }
+
     if (uPortalEnabled > 0.5) {
         vec3 portalDir = safeNormalize(uPortalDir);
         vec3 toPoint = vWorldPos - uPortalOrigin;
@@ -1075,6 +1086,18 @@ function renderer.drawWorld(objects, camera, backgroundColor)
             state.shader:send("uPortalEnd", 0.01)
             state.shader:send("uPortalRadiusNear", 0)
             state.shader:send("uPortalRadiusFar", 0)
+        end
+        local terrainClipBand = obj.terrainClipBand
+        if type(terrainClipBand) == "table" and terrainClipBand.enabled then
+            local innerRadius = math.max(0.0, tonumber(terrainClipBand.innerRadius) or 0.0)
+            local outerRadius = math.max(innerRadius + 0.001, tonumber(terrainClipBand.outerRadius) or (innerRadius + 0.001))
+            state.shader:send("uTerrainClipEnabled", 1)
+            state.shader:send("uTerrainClipInnerRadius", innerRadius)
+            state.shader:send("uTerrainClipOuterRadius", outerRadius)
+        else
+            state.shader:send("uTerrainClipEnabled", 0)
+            state.shader:send("uTerrainClipInnerRadius", 0)
+            state.shader:send("uTerrainClipOuterRadius", state.farPlane)
         end
 
         local baseColorFactor = material.baseColorFactor or defaultMaterial.baseColorFactor

@@ -402,6 +402,10 @@ local function getTerrainTextureResolution(params, lod)
 	return clamp(math.floor(tonumber(params.lod2TextureResolution) or 64), 16, 256)
 end
 
+local function getTerrainTextureMaxLod(params)
+	return clamp(math.floor(tonumber(params and params.textureTileMaxLod) or 0), -1, 8)
+end
+
 local function ensureChunkModelUvSet(model, bounds)
 	if type(model) ~= "table" or type(model.vertices) ~= "table" then
 		return
@@ -461,6 +465,9 @@ local function buildChunkTextureImage(cx, cz, lod, params, fieldContext)
 	local image = loveLib.graphics.newImage(imageData)
 	image:setFilter("linear", "linear", 4)
 	pcall(function()
+		image:setWrap("clamp", "clamp")
+	end)
+	pcall(function()
 		image:setMipmapFilter("linear", 0.25)
 	end)
 	return image
@@ -471,6 +478,9 @@ local function applyChunkTextureTile(obj, cx, cz, lod, params, fieldContext)
 		return
 	end
 	if params.textureTilesEnabled == false or not supportsTerrainTextureTiles() then
+		return
+	end
+	if lod > getTerrainTextureMaxLod(params) then
 		return
 	end
 	local chunkWorldSize = getChunkWorldSize(params, lod)
@@ -847,6 +857,7 @@ function terrain.normalizeGroundParams(params, defaultGroundParams)
 	merged.lod1ChunkScale = math.max(merged.lod0ChunkScale, math.floor(tonumber(merged.lod1ChunkScale) or 4))
 	merged.lod2ChunkScale = math.max(merged.lod1ChunkScale, math.floor(tonumber(merged.lod2ChunkScale) or 16))
 	merged.textureTilesEnabled = merged.textureTilesEnabled ~= false
+	merged.textureTileMaxLod = clamp(math.floor(tonumber(merged.textureTileMaxLod) or 0), -1, 8)
 	merged.lod0TextureResolution = clamp(math.floor(tonumber(merged.lod0TextureResolution) or 512), 64, 512)
 	merged.lod1TextureResolution = clamp(math.floor(tonumber(merged.lod1TextureResolution) or 256), 32, 512)
 	merged.lod2TextureResolution = clamp(math.floor(tonumber(merged.lod2TextureResolution) or 64), 16, 256)
@@ -1002,6 +1013,7 @@ function terrain.groundParamsEqual(a, b)
 		"lod1ChunkScale",
 		"lod2ChunkScale",
 		"textureTilesEnabled",
+		"textureTileMaxLod",
 		"lod0TextureResolution",
 		"lod1TextureResolution",
 		"lod2TextureResolution",
@@ -1149,11 +1161,13 @@ local function ensureTerrainState(context)
 		activeGroundParams = nil,
 		generatorVersion = 1,
 		requiredSet = {},
+		workerPool = nil,
 		workerThread = nil,
 		workerRequestChannel = nil,
 		workerResponseChannel = nil,
 		workerInflight = {},
 		workerGeneration = 0,
+		workerCollectCursor = 0,
 		workerAvailable = false,
 		chunkCache = {},
 		chunkCacheStamp = {},
@@ -1184,7 +1198,9 @@ local function ensureTerrainState(context)
 	terrainState.buildQueue = terrainState.buildQueue or {}
 	terrainState.chunkOrder = terrainState.chunkOrder or {}
 	terrainState.requiredSet = terrainState.requiredSet or {}
+	terrainState.workerPool = type(terrainState.workerPool) == "table" and terrainState.workerPool or nil
 	terrainState.workerInflight = terrainState.workerInflight or {}
+	terrainState.workerCollectCursor = math.max(0, math.floor(tonumber(terrainState.workerCollectCursor) or 0))
 	terrainState.chunkCache = terrainState.chunkCache or {}
 	terrainState.chunkCacheStamp = terrainState.chunkCacheStamp or {}
 	terrainState.chunkCacheCount = tonumber(terrainState.chunkCacheCount) or countTableKeys(terrainState.chunkCache)
@@ -1201,44 +1217,101 @@ local function ensureTerrainState(context)
 	return terrainState
 end
 
-local function initializeWorker(terrainState)
-	if terrainState.workerAvailable then
-		return true
+local function resolveMeshingWorkerCount(params)
+	local maxInflight = clamp(math.floor(tonumber(params and params.workerMaxInflight) or 2), 1, 6)
+	local processorCount = 2
+	if type(loveLib) == "table" and type(loveLib.system) == "table" and type(loveLib.system.getProcessorCount) == "function" then
+		local okCount, value = pcall(loveLib.system.getProcessorCount)
+		if okCount then
+			processorCount = math.max(1, math.floor(tonumber(value) or processorCount))
+		end
 	end
+	return clamp(math.min(maxInflight, math.max(1, processorCount - 1)), 1, 4)
+end
+
+local function shutdownWorkerPool(terrainState)
+	local pool = terrainState and terrainState.workerPool or nil
+	if type(pool) == "table" then
+		for i = 1, #pool do
+			local worker = pool[i]
+			if worker and worker.requestChannel then
+				pcall(function()
+					worker.requestChannel:push({
+						type = "quit"
+					})
+				end)
+			end
+		end
+	end
+	terrainState.workerPool = nil
+	terrainState.workerThread = nil
+	terrainState.workerRequestChannel = nil
+	terrainState.workerResponseChannel = nil
+	terrainState.workerInflight = {}
+	terrainState.workerCollectCursor = 0
+	terrainState.workerAvailable = false
+end
+
+local function initializeWorker(terrainState)
 	if not supportsThreading() then
 		return false
 	end
-	if terrainState.workerThread then
+	local params = terrainState.activeGroundParams or {}
+	local desiredCount = resolveMeshingWorkerCount(params)
+	if type(terrainState.workerPool) == "table" and #terrainState.workerPool == desiredCount and #terrainState.workerPool > 0 then
 		terrainState.workerAvailable = true
 		return true
 	end
+	if terrainState.workerPool then
+		shutdownWorkerPool(terrainState)
+	end
 
-	local workerId = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
-	local requestName = "terrain_mesh_req_" .. workerId
-	local responseName = "terrain_mesh_rsp_" .. workerId
 	local scriptPath = resolvePortSourceThreadPath("Source/Systems/TerrainMeshingWorker.lua")
+	local pool = {}
+	for i = 1, desiredCount do
+		local workerId = table.concat({
+			tostring(os.time()),
+			tostring(math.random(100000, 999999)),
+			tostring(i)
+		}, "_")
+		local requestName = "terrain_mesh_req_" .. workerId
+		local responseName = "terrain_mesh_rsp_" .. workerId
+		local ok, threadOrErr = pcall(function()
+			return loveLib.thread.newThread(scriptPath)
+		end)
+		if not ok or not threadOrErr then
+			shutdownWorkerPool({
+				workerPool = pool
+			})
+			return false
+		end
 
-	local ok, threadOrErr = pcall(function()
-		return loveLib.thread.newThread(scriptPath)
-	end)
-	if not ok or not threadOrErr then
-		return false
+		local requestChannel = loveLib.thread.getChannel(requestName)
+		local responseChannel = loveLib.thread.getChannel(responseName)
+		local started = pcall(function()
+			threadOrErr:start(requestName, responseName, getPortSourceRootPath())
+		end)
+		if not started then
+			shutdownWorkerPool({
+				workerPool = pool
+			})
+			return false
+		end
+		pool[#pool + 1] = {
+			thread = threadOrErr,
+			requestChannel = requestChannel,
+			responseChannel = responseChannel,
+			inflightCount = 0
+		}
 	end
 
-	local requestChannel = loveLib.thread.getChannel(requestName)
-	local responseChannel = loveLib.thread.getChannel(responseName)
-	local started = pcall(function()
-		threadOrErr:start(requestName, responseName, getPortSourceRootPath())
-	end)
-	if not started then
-		return false
-	end
-
-	terrainState.workerThread = threadOrErr
-	terrainState.workerRequestChannel = requestChannel
-	terrainState.workerResponseChannel = responseChannel
+	terrainState.workerPool = pool
+	terrainState.workerThread = pool[1] and pool[1].thread or nil
+	terrainState.workerRequestChannel = pool[1] and pool[1].requestChannel or nil
+	terrainState.workerResponseChannel = pool[1] and pool[1].responseChannel or nil
 	terrainState.workerInflight = {}
 	terrainState.workerGeneration = 0
+	terrainState.workerCollectCursor = 0
 	terrainState.workerAvailable = true
 	terrainState.workerParamsToken = nil
 	terrainState.workerUsesBinaryJobs = type(loveLib.data) == "table" and type(loveLib.data.pack) == "function"
@@ -1249,12 +1322,32 @@ local function resetWorkerGeneration(terrainState)
 	terrainState.workerGeneration = math.max(0, math.floor(tonumber(terrainState.workerGeneration) or 0)) + 1
 	terrainState.workerInflight = {}
 	terrainState.workerParamsToken = nil
-	if terrainState.workerResponseChannel then
-		while true do
-			local msg = terrainState.workerResponseChannel:pop()
-			if not msg then
-				break
+	terrainState.workerCollectCursor = 0
+	if type(terrainState.workerPool) == "table" then
+		for i = 1, #terrainState.workerPool do
+			local worker = terrainState.workerPool[i]
+			if worker then
+				worker.inflightCount = 0
 			end
+			if worker and worker.responseChannel then
+				while true do
+					local msg = worker.responseChannel:pop()
+					if not msg then
+						break
+					end
+				end
+			end
+		end
+	end
+end
+
+local function releaseWorkerInflightSlot(terrainState, key)
+	local workerIndex = terrainState.workerInflight[key]
+	terrainState.workerInflight[key] = nil
+	if type(workerIndex) == "number" and type(terrainState.workerPool) == "table" then
+		local worker = terrainState.workerPool[workerIndex]
+		if worker then
+			worker.inflightCount = math.max(0, math.floor(tonumber(worker.inflightCount) or 0) - 1)
 		end
 	end
 end
@@ -1391,6 +1484,67 @@ local function deriveRuntimeParams(params, terrainState, frameTimeMs)
 	return terrain.normalizeGroundParams(runtimeParams, runtimeParams)
 end
 
+local function resolveStreamingRadii(params, drawDistance)
+	local chunkSize = math.max(8.0, tonumber(params and params.chunkSize) or 128)
+	local desiredDrawDistance = tonumber(drawDistance)
+	local gameplayRadius = math.max(
+		chunkSize,
+		tonumber(params and params.gameplayRadiusMeters) or (chunkSize * math.max(tonumber(params and params.lod0Radius) or 4, 4))
+	)
+	local midRadius = math.max(
+		gameplayRadius + chunkSize,
+		tonumber(params and params.midFieldRadiusMeters) or (chunkSize * math.max(tonumber(params and params.lod1Radius) or 16, 16))
+	)
+	local horizonRadius = math.max(
+		midRadius + chunkSize,
+		tonumber(params and params.horizonRadiusMeters) or (chunkSize * math.max(tonumber(params and params.lod2Radius) or 64, 64))
+	)
+	if desiredDrawDistance and desiredDrawDistance > 0 then
+		horizonRadius = math.max(horizonRadius, desiredDrawDistance)
+	end
+	return gameplayRadius, midRadius, horizonRadius
+end
+
+function terrain.resolveStreamingRadii(params, drawDistance)
+	local gameplayRadius, midFieldRadius, horizonRadius = resolveStreamingRadii(params or {}, drawDistance)
+	return {
+		gameplayRadius = gameplayRadius,
+		midFieldRadius = midFieldRadius,
+		horizonRadius = horizonRadius
+	}
+end
+
+function terrain.resolveTerrainRenderBand(params, lod, drawDistance)
+	local normalizedLod = math.max(0, math.floor(tonumber(lod) or 0))
+	local gameplayRadius, midFieldRadius, horizonRadius = resolveStreamingRadii(params or {}, drawDistance)
+	local lod0Bias = math.max(1.0, (tonumber(params and params.lod0CellSize) or 3.0) * 0.5)
+	local lod1Bias = math.max(1.0, (tonumber(params and params.lod1CellSize) or 6.0) * 0.5)
+	local lod2Bias = math.max(1.0, (tonumber(params and params.lod2CellSize) or 12.0) * 0.5)
+	local gameplayBoundary = gameplayRadius + lod0Bias
+	local midBoundary = midFieldRadius + lod1Bias
+	local horizonBoundary = horizonRadius + lod2Bias
+
+	if normalizedLod <= 0 then
+		return {
+			enabled = true,
+			innerRadius = 0.0,
+			outerRadius = gameplayBoundary
+		}
+	end
+	if normalizedLod == 1 then
+		return {
+			enabled = true,
+			innerRadius = gameplayBoundary,
+			outerRadius = midBoundary
+		}
+	end
+	return {
+		enabled = true,
+		innerRadius = midBoundary,
+		outerRadius = horizonBoundary
+	}
+end
+
 local function normalize2(x, z)
 	local len = math.sqrt((x * x) + (z * z))
 	if len <= 1e-6 then
@@ -1434,22 +1588,7 @@ local function computeRequiredChunkSet(params, camera, drawDistance)
 	local chunkSize = math.max(8.0, tonumber(params.chunkSize) or 128)
 	local cameraX = (camera.pos and camera.pos[1]) or 0
 	local cameraZ = (camera.pos and camera.pos[3]) or 0
-	local desiredDrawDistance = tonumber(drawDistance)
-	local gameplayRadius = math.max(
-		chunkSize,
-		tonumber(params.gameplayRadiusMeters) or (chunkSize * math.max(tonumber(params.lod0Radius) or 4, 4))
-	)
-	local midRadius = math.max(
-		gameplayRadius + chunkSize,
-		tonumber(params.midFieldRadiusMeters) or (chunkSize * math.max(tonumber(params.lod1Radius) or 16, 16))
-	)
-	local horizonRadius = math.max(
-		midRadius + chunkSize,
-		tonumber(params.horizonRadiusMeters) or (chunkSize * math.max(tonumber(params.lod2Radius) or 64, 64))
-	)
-	if desiredDrawDistance and desiredDrawDistance > 0 then
-		horizonRadius = math.max(horizonRadius, desiredDrawDistance)
-	end
+	local gameplayRadius, midRadius, horizonRadius = resolveStreamingRadii(params, drawDistance)
 
 	local baseCenterCx = math.floor(cameraX / chunkSize)
 	local baseCenterCz = math.floor(cameraZ / chunkSize)
@@ -1525,7 +1664,8 @@ local function flushChunkQueueSync(terrainState, params, objects, qModule)
 end
 
 local function dispatchChunkQueueToWorker(terrainState, params)
-	if not terrainState.workerAvailable or not terrainState.workerRequestChannel then
+	local pool = terrainState.workerPool
+	if not terrainState.workerAvailable or type(pool) ~= "table" or #pool <= 0 then
 		return false
 	end
 
@@ -1534,26 +1674,43 @@ local function dispatchChunkQueueToWorker(terrainState, params)
 		paramsChanged = not terrain.groundParamsEqual(terrainState.workerParamsToken, params)
 	end
 	if paramsChanged then
-		local okParams = pcall(function()
-			terrainState.workerRequestChannel:push({
-				type = "set_params",
-				params = params
-			})
-		end)
-		if not okParams then
-			return false
+		for i = 1, #pool do
+			local worker = pool[i]
+			local okParams = pcall(function()
+				worker.requestChannel:push({
+					type = "set_params",
+					params = params
+				})
+			end)
+			if not okParams then
+				return false
+			end
 		end
 		terrainState.workerParamsToken = cloneWorkerParamsSnapshot(params)
 	end
 
 	local maxInflight = clamp(math.floor(tonumber(params.workerMaxInflight) or 2), 1, 6)
-	local inflight = 0
-	for _ in pairs(terrainState.workerInflight) do
-		inflight = inflight + 1
-	end
+	local inflight = countInflight(terrainState)
 
 	if inflight >= maxInflight then
 		return false
+	end
+
+	local function selectWorker()
+		local bestIndex = nil
+		local bestInflight = math.huge
+		for i = 1, #pool do
+			local worker = pool[i]
+			local workerInflight = math.max(0, math.floor(tonumber(worker and worker.inflightCount) or 0))
+			if workerInflight < bestInflight then
+				bestInflight = workerInflight
+				bestIndex = i
+			end
+		end
+		if bestIndex then
+			return bestIndex, pool[bestIndex]
+		end
+		return nil, nil
 	end
 
 	local dispatched = false
@@ -1562,10 +1719,15 @@ local function dispatchChunkQueueToWorker(terrainState, params)
 		if inflight >= maxInflight then
 			nextOrder[#nextOrder + 1] = key
 		elseif terrainState.buildQueue[key] then
+			local workerIndex, worker = selectWorker()
+			if not worker then
+				nextOrder[#nextOrder + 1] = key
+				goto continue
+			end
 			local cx, cz, lod = parseChunkKey(key)
 			local ok = pcall(function()
 				if terrainState.workerUsesBinaryJobs and loveLib.data and loveLib.data.pack then
-					terrainState.workerRequestChannel:push({
+					worker.requestChannel:push({
 						type = "build_chunk_bin",
 						key = key,
 						payload = loveLib.data.pack(
@@ -1578,7 +1740,7 @@ local function dispatchChunkQueueToWorker(terrainState, params)
 						)
 					})
 				else
-					terrainState.workerRequestChannel:push({
+					worker.requestChannel:push({
 						type = "build_chunk",
 						key = key,
 						cx = cx,
@@ -1590,12 +1752,14 @@ local function dispatchChunkQueueToWorker(terrainState, params)
 			end)
 			if ok then
 				terrainState.buildQueue[key] = nil
-				terrainState.workerInflight[key] = true
+				terrainState.workerInflight[key] = workerIndex
+				worker.inflightCount = math.max(0, math.floor(tonumber(worker.inflightCount) or 0)) + 1
 				inflight = inflight + 1
 				dispatched = true
 			else
 				nextOrder[#nextOrder + 1] = key
 			end
+			::continue::
 		end
 	end
 	terrainState.chunkOrder = nextOrder
@@ -1603,7 +1767,8 @@ local function dispatchChunkQueueToWorker(terrainState, params)
 end
 
 local function collectWorkerChunkResults(terrainState, params, objects, qModule, profiler)
-	if not terrainState.workerAvailable or not terrainState.workerResponseChannel then
+	local pool = terrainState.workerPool
+	if not terrainState.workerAvailable or type(pool) ~= "table" or #pool <= 0 then
 		return false
 	end
 
@@ -1717,18 +1882,35 @@ local function collectWorkerChunkResults(terrainState, params, objects, qModule,
 		end
 		return model
 	end
+	local function popWorkerMessage()
+		local poolCount = #pool
+		if poolCount <= 0 then
+			return nil
+		end
+		local startIndex = math.max(0, math.floor(tonumber(terrainState.workerCollectCursor) or 0))
+		for offset = 1, poolCount do
+			local workerIndex = ((startIndex + offset - 1) % poolCount) + 1
+			local worker = pool[workerIndex]
+			local msg = worker and worker.responseChannel and worker.responseChannel:pop() or nil
+			if msg then
+				terrainState.workerCollectCursor = workerIndex % poolCount
+				return msg
+			end
+		end
+		return nil
+	end
 	while processedCount < maxResultsPerFrame do
 		if ((currentTimeSeconds() - startedAt) * 1000.0) >= maxFinalizeMs then
 			break
 		end
-		local msg = terrainState.workerResponseChannel:pop()
+		local msg = popWorkerMessage()
 		if not msg then
 			break
 		end
 		processedCount = processedCount + 1
 		if type(msg) == "table" and msg.type == "build_chunk_done" then
 			local key = tostring(msg.key or "")
-			terrainState.workerInflight[key] = nil
+			releaseWorkerInflightSlot(terrainState, key)
 			local generation = math.floor(tonumber(msg.generation) or -1)
 			local buildMs = math.max(0, tonumber(msg.buildMs) or 0)
 			if buildMs > 0 then
@@ -1755,7 +1937,7 @@ local function collectWorkerChunkResults(terrainState, params, objects, qModule,
 			end
 		elseif type(msg) == "table" and msg.type == "build_chunk_done_bin" then
 			local key = tostring(msg.key or "")
-			terrainState.workerInflight[key] = nil
+			releaseWorkerInflightSlot(terrainState, key)
 			local generation = math.floor(tonumber(msg.generation) or -1)
 			local buildMs = math.max(0, tonumber(msg.buildMs) or 0)
 			if buildMs > 0 then
@@ -1787,7 +1969,7 @@ local function collectWorkerChunkResults(terrainState, params, objects, qModule,
 			end
 		elseif type(msg) == "table" and msg.type == "build_chunk_failed" then
 			local key = tostring(msg.key or "")
-			terrainState.workerInflight[key] = nil
+			releaseWorkerInflightSlot(terrainState, key)
 			if key ~= "" and terrainState.requiredSet[key] then
 				queueChunkBuild(terrainState, key)
 			end
@@ -2395,13 +2577,25 @@ function terrain.updateGroundStreaming(forceRebuild, context)
 		terrainProfileColors.workerHealth,
 		"terrain worker health"
 	)
-	if terrainState.workerAvailable and terrainState.workerThread and type(terrainState.workerThread.getError) == "function" then
-		local workerError = terrainState.workerThread:getError()
+	if terrainState.workerAvailable and type(terrainState.workerPool) == "table" then
+		local workerError = nil
+		for i = 1, #terrainState.workerPool do
+			local worker = terrainState.workerPool[i]
+			if worker and worker.thread and type(worker.thread.getError) == "function" then
+				workerError = worker.thread:getError()
+				if workerError then
+					break
+				end
+			end
+		end
 		if workerError then
-			terrainState.workerAvailable = false
+			local inflightKeys = {}
 			for key in pairs(terrainState.workerInflight) do
-				terrainState.workerInflight[key] = nil
-				queueChunkBuild(terrainState, key)
+				inflightKeys[#inflightKeys + 1] = key
+			end
+			shutdownWorkerPool(terrainState)
+			for i = 1, #inflightKeys do
+				queueChunkBuild(terrainState, inflightKeys[i])
 			end
 		end
 	end

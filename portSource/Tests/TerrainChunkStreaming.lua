@@ -32,6 +32,28 @@ local function countRequiredLods(state)
     return counts
 end
 
+local function countDisplayedHighLodChunks(state)
+    local count = 0
+    for _, obj in pairs(state.chunkMap or {}) do
+        local lod = math.floor(tonumber(obj and obj.chunkLod) or 0)
+        if lod > 0 then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function countTexturedHighLodChunks(state)
+    local count = 0
+    for _, obj in pairs(state.chunkMap or {}) do
+        local lod = math.floor(tonumber(obj and obj.chunkLod) or 0)
+        if lod > 0 and type(obj and obj.materials) == "table" and #obj.materials > 0 then
+            count = count + 1
+        end
+    end
+    return count
+end
+
 local function chunkWorldSize(params, lod)
     lod = math.max(0, math.floor(tonumber(lod) or 0))
     if lod <= 0 then
@@ -114,10 +136,20 @@ local function run()
     assertTrue((requiredLods[0] or 0) > 0, "required set should include near gameplay chunks")
     assertTrue((requiredLods[1] or 0) > 0, "required set should include mid-field chunks")
     assertTrue((requiredLods[2] or 0) > 0, "required set should include horizon chunks")
+    local lod0Band = terrain.resolveTerrainRenderBand(baseParams, 0, context.drawDistance)
+    local lod1Band = terrain.resolveTerrainRenderBand(baseParams, 1, context.drawDistance)
+    local lod2Band = terrain.resolveTerrainRenderBand(baseParams, 2, context.drawDistance)
+    assertTrue(math.abs((lod0Band.outerRadius or 0) - (lod1Band.innerRadius or 0)) < 1e-6,
+        "lod0 and lod1 render bands should meet without overlap")
+    assertTrue(math.abs((lod1Band.outerRadius or 0) - (lod2Band.innerRadius or 0)) < 1e-6,
+        "lod1 and lod2 render bands should meet without overlap")
     assertTrue(pointCovered(context.terrainState, baseParams, 0, 0), "origin should be covered by a displayed chunk")
     assertTrue(pointCovered(context.terrainState, baseParams, 72, 0), "near-to-mid ring transition should stay covered")
     assertTrue(pointCovered(context.terrainState, baseParams, 216, 0), "mid ring should stay covered")
     assertTrue(pointCovered(context.terrainState, baseParams, 720, 0), "horizon ring should stay covered")
+    assertTrue(countDisplayedHighLodChunks(context.terrainState) > 0, "streaming should display at least one high-lod chunk")
+    assertTrue(countTexturedHighLodChunks(context.terrainState) == 0,
+        "lod1+ chunks should avoid per-chunk texture tiles to keep finalize work bounded")
 
     local initialCenterX = context.terrainState.centerChunkX
     context.camera.pos[1] = context.camera.pos[1] + (baseParams.chunkSize * 2)

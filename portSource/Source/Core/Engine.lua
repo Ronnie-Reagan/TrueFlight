@@ -730,6 +730,21 @@ local function pointInsidePortal(worldPos, portal)
     return radial <= radius
 end
 
+local function pointInsideTerrainClipBand(worldPos, cameraPos, band)
+    if type(worldPos) ~= "table" or type(cameraPos) ~= "table" or type(band) ~= "table" or band.enabled == false then
+        return true
+    end
+    local dx = (worldPos[1] or 0) - (cameraPos[1] or 0)
+    local dz = (worldPos[3] or 0) - (cameraPos[3] or 0)
+    local distSq = dx * dx + dz * dz
+    local innerRadius = math.max(0, tonumber(band.innerRadius) or 0)
+    local outerRadius = math.max(innerRadius + 0.001, tonumber(band.outerRadius) or math.huge)
+    if innerRadius > 0 and distSq < (innerRadius * innerRadius) then
+        return false
+    end
+    return distSq < (outerRadius * outerRadius)
+end
+
 function engine.drawObject(obj, cullBackfaces, camera, vector3, q, screen, zBuffer, imageData, writeDepth)
     if not obj or not obj.model or not obj.model.vertices or not obj.model.faces then
         return imageData
@@ -779,7 +794,8 @@ function engine.drawObject(obj, cullBackfaces, camera, vector3, q, screen, zBuff
         end
         if not faceValid then goto continue end
 
-        if obj.firstPersonPortal and obj.firstPersonPortal.enabled and #face >= 3 then
+        if (obj.firstPersonPortal and obj.firstPersonPortal.enabled and #face >= 3) or
+            (obj.terrainClipBand and obj.terrainClipBand.enabled and #face >= 3) then
             local wcx, wcy, wcz = 0, 0, 0
             local count = 0
             for _, vi in ipairs(face) do
@@ -793,7 +809,11 @@ function engine.drawObject(obj, cullBackfaces, camera, vector3, q, screen, zBuff
             end
             if count > 0 then
                 local center = { wcx / count, wcy / count, wcz / count }
-                if pointInsidePortal(center, obj.firstPersonPortal) then
+                if obj.firstPersonPortal and obj.firstPersonPortal.enabled and pointInsidePortal(center, obj.firstPersonPortal) then
+                    goto continue
+                end
+                if obj.terrainClipBand and obj.terrainClipBand.enabled and
+                    (not pointInsideTerrainClipBand(center, camera.pos, obj.terrainClipBand)) then
                     goto continue
                 end
             end
