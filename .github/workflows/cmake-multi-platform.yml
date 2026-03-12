@@ -1,16 +1,18 @@
-name: Build TrueFlight Windows EXE
+name: Build and Release TrueFlight Windows EXE
 
 on:
   push:
     branches:
       - main
+    tags:
+      - 'V*'
   pull_request:
     branches:
       - main
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -49,7 +51,10 @@ jobs:
       - name: Stage package
         shell: pwsh
         run: |
-          $stageDir = Join-Path $env:GITHUB_WORKSPACE "dist/TrueFlight-windows-x64"
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-${{ github.run_number }}" }
+          $packageName = "TrueFlight-windows-x64-$version"
+
+          $stageDir = Join-Path $env:GITHUB_WORKSPACE "dist/$packageName"
           $assetDir = Join-Path $stageDir "portSource/Assets"
 
           if (Test-Path $stageDir) {
@@ -63,9 +68,49 @@ jobs:
           Copy-Item "portSource/Assets/*" -Destination $assetDir -Recurse -Force
           Copy-Item "LICENSE.txt" -Destination $stageDir -Force
 
+      - name: Create zip package
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-${{ github.run_number }}" }
+          $packageName = "TrueFlight-windows-x64-$version"
+          $packageDir = Join-Path $env:GITHUB_WORKSPACE "dist/$packageName"
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "dist/$packageName.zip"
+
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          Compress-Archive -Path "$packageDir/*" -DestinationPath $zipPath
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TrueFlight-windows-x64
+          name: TrueFlight-windows-x64-${{ github.run_number }}
           if-no-files-found: error
-          path: dist/TrueFlight-windows-x64
+          path: dist/*.zip
+
+      - name: Determine release type
+        if: github.ref_type == 'tag'
+        id: release_meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+
+          if ($tag -match '^V0\.') {
+            "prerelease=true" >> $env:GITHUB_OUTPUT
+            "release_name=TrueFlight Pre-Release $tag" >> $env:GITHUB_OUTPUT
+          }
+          else {
+            "prerelease=false" >> $env:GITHUB_OUTPUT
+            "release_name=TrueFlight $tag" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.release_meta.outputs.release_name }}
+          tag_name: ${{ github.ref_name }}
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          generate_release_notes: true
+          files: dist/TrueFlight-windows-x64-${{ github.ref_name }}.zip
